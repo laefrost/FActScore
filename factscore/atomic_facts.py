@@ -10,6 +10,8 @@ import openai
 from rank_bm25 import BM25Okapi
 import os
 import time
+import nltk
+nltk.download('punkt_tab')
 from nltk.tokenize import sent_tokenize
 
 from factscore.openai_lm import OpenAIModel
