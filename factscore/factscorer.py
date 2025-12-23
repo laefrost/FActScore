@@ -9,6 +9,7 @@ from tqdm import tqdm
 from factscore.abstain_detection import is_response_abstained
 from factscore.atomic_facts import AtomicFactGenerator
 from factscore.clm import CLM
+from factscore.gpt_oss_lm import Oss
 from factscore.npm import NPM
 from factscore.openai_lm import OpenAIModel
 from factscore.retrieval import DocDB, Retrieval
@@ -16,7 +17,7 @@ from factscore.retrieval import DocDB, Retrieval
 class FactScorer(object):
 
     def __init__(self,
-                 model_name="retrieval+ChatGPT",
+                 model_name="retrieval+gpt-oss-20b",
                  data_dir=".cache/factscore",
                  model_dir=".cache/factscore",
                  cache_dir=".cache/factscore",
@@ -24,7 +25,7 @@ class FactScorer(object):
                  cost_estimate="consider_cache",
                  abstain_detection_type=None,
                  batch_size=256):
-        assert model_name in ["retrieval+llama", "retrieval+llama+npm", "retrieval+ChatGPT", "npm", "retrieval+ChatGPT+npm"]
+        assert model_name in ["retrieval+llama", "retrieval+llama+npm", "retrieval+ChatGPT", "npm", "retrieval+ChatGPT+npm", "ChatGPT", "gpt-oss", "retrieval+gpt-oss-20b"]
         self.model_name = model_name
 
         self.db = {}
@@ -50,6 +51,8 @@ class FactScorer(object):
             self.lm = OpenAIModel("ChatGPT",
                                   cache_file=os.path.join(cache_dir, "ChatGPT.pkl"),
                                   key_path=openai_key)
+        elif "oss" in model_name: 
+            self.lm = Oss(model_name="gpt-oss-20b")
         else:
             self.lm = None
 
@@ -108,12 +111,15 @@ class FactScorer(object):
                   atomic_facts=None,
                   knowledge_source=None,
                   verbose=False):
+        
         if knowledge_source is None:
             # use the default knowledge source
             knowledge_source = "enwiki-20230401"
 
-        if knowledge_source not in self.retrieval:
+        if knowledge_source not in self.retrieval and self.model_name not in ["ChatGPT", "gpt-oss-20b"]:
             self.register_knowledge_source(knowledge_source)
+        else:
+            knowledge_source = None
 
         if type(topics)==type(generations)==str:
             topics = [topics]
@@ -140,7 +146,9 @@ class FactScorer(object):
             if verbose:
                 topics = tqdm(topics)
 
+            # list of all facts (list) across all generations and topics
             atomic_facts = []
+            corresponding_sentences = []
             for topic, gen in zip(topics, generations):
                 # optionally, first detect if the response is abstained
                 response_abstained = is_response_abstained(gen, self.abstain_detection_type)
@@ -149,11 +157,15 @@ class FactScorer(object):
                     continue
                 # continue only when the response is not abstained
                 curr_afs, _ = self.af_generator.run(gen)
+                # list of facts in the respective generation
                 curr_afs = [fact for _, facts in curr_afs for fact in facts]
+                curr_sent = [sent for sents, _  in curr_afs for sent in sents]
                 if len(curr_afs)==0:
                     atomic_facts.append(None)
+                    corresponding_sentences.append(None)
                 else:
                     atomic_facts.append(curr_afs)
+                    corresponding_sentences.append(curr_sent)
                 if len(atomic_facts) % 10 == 0:
                     self.af_generator.save_cache()
 
@@ -175,15 +187,16 @@ class FactScorer(object):
             topics = tqdm(topics)
 
         scores = []
+        score_list = []
         init_scores = []
         decisions = []
-        for topic, generation, facts in zip(topics, generations, atomic_facts):
+        for topic, generation, facts, sentences in zip(topics, generations, atomic_facts, corresponding_sentences):
             if facts is None:
                 decisions.append(None)
             else:
-                decision = self._get_score(topic, generation, facts, knowledge_source)
+                decision = self._get_score(topic, generation, facts, sentences, knowledge_source)
                 score = np.mean([d["is_supported"] for d in decision])
-                
+                                
                 if gamma:
                     init_scores.append(score)
                     penalty = 1.0 if len(facts)>gamma else np.exp(1-gamma/len(facts))
@@ -191,37 +204,45 @@ class FactScorer(object):
                 
                 decisions.append(decision)
                 scores.append(score)
+                score_list.append({"facts" : facts, "sentence" : sentences, "score" : score, "generation" : generation, "topic" : topic})
                 if len(scores) % 10 == 0:
                     self.save_cache()
 
         self.save_cache()
 
-        out = {"score": np.mean(scores),
-               "respond_ratio": respond_ratio,
-               "decisions": decisions,
-               "num_facts_per_response": np.mean([len(d) for d in decisions if d is not None])}
+        out = { 
+                # scores across facts in generation
+                "scores" : score_list, 
+                # score for all generation
+                "score": np.mean(scores),
+                "respond_ratio": respond_ratio,
+                "decisions": decisions,
+                "num_facts_per_response": np.mean([len(d) for d in decisions if d is not None])}
 
         if gamma:
             out["init_score"] = np.mean(init_scores)
         
         return out
 
-    def _get_score(self, topic, generation, atomic_facts, knowledge_source, cost_estimate=None):
+    def _get_score(self, topic, generation, atomic_facts, sentences, knowledge_source = None, cost_estimate=None):
         decisions = []
         total_words = 0
-        for atom in atomic_facts:
+        for atom, sent in zip(atomic_facts, sentences):
             atom = atom.strip()
             if self.lm:
-                passages = self.retrieval[knowledge_source].get_passages(topic, atom, k=5)
-                definition = "Answer the question about {} based on the given context.\n\n".format(topic)
-                context = ""
-                for psg_idx, psg in enumerate(reversed(passages)):
-                    context += "Title: {}\nText: {}\n\n".format(psg["title"], psg["text"].replace("<s>", "").replace("</s>", ""))
-                definition += context.strip()
-                if not definition[-1] in string.punctuation:
-                    definition += "."
-                prompt = "{}\n\nInput: {} True or False?\nOutput:".format(definition.strip(), atom.strip())
-
+                if knowledge_source != None: 
+                    passages = self.retrieval[knowledge_source].get_passages(topic, atom, k=5)
+                    definition = "Answer the question about {} based on the given context.\n\n".format(topic)
+                    context = ""
+                    for psg_idx, psg in enumerate(reversed(passages)):
+                        context += "Title: {}\nText: {}\n\n".format(psg["title"], psg["text"].replace("<s>", "").replace("</s>", ""))
+                    definition += context.strip()
+                    if not definition[-1] in string.punctuation:
+                        definition += "."
+                    prompt = "{}\n\nInput: {} True or False?\nOutput:".format(definition.strip(), atom.strip())
+                else: 
+                    prompt = "Input: {} True or False?\nOutput:".format(atom.strip())
+                    
                 if cost_estimate:
                     if cost_estimate == "consider_cache" and (prompt.strip() + "_0") not in self.lm.cache_dict:
                         total_words += len(prompt.split())
@@ -258,7 +279,7 @@ class FactScorer(object):
                 npprob = self.npm[knowledge_source].get_probabilty(topic, atom)
                 is_supported = npprob > 0.3
 
-            decisions.append({"atom": atom, "is_supported": is_supported})
+            decisions.append({"atom": atom, "is_supported": is_supported, "sentence" : sent})
 
         if cost_estimate:
             return total_words
@@ -294,8 +315,6 @@ if __name__ == '__main__':
     parser.add_argument('--knowledge_source',
                         type=str,
                         default=None)
-
-
     parser.add_argument('--cost_estimate',
                         type=str,
                         default="consider_cache",
