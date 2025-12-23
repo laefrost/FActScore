@@ -128,13 +128,13 @@ def call_instruct_model(
             )
             received = True
 
-        except Exception:
+        except Exception as e:
             error = sys.exc_info()[0]
             num_rate_errors += 1
 
             logging.error(
                 "API error: %s (%d). Waiting %d sec",
-                error,
+                str(e),
                 num_rate_errors,
                 2 ** num_rate_errors
             )
