@@ -18,10 +18,10 @@ class OpenAIModel(LM):
     def load_model(self):
         # load api key
         key_path = self.key_path
-        assert os.path.exists(key_path), f"Please place your OpenAI APT Key in {key_path}."
-        with open(key_path, 'r') as f:
-            api_key = f.readline()
-        openai.api_key = api_key.strip()
+        #assert os.path.exists(key_path), f"Please place your OpenAI APT Key in {key_path}."
+        #with open(key_path, 'r') as f:
+        #    api_key = f.readline()
+        openai.api_key = os.environ["OPENAI_API_KEY"]#api_key.strip()
         self.model = self.model_name
 
     def _generate(self, prompt, max_sequence_length=2048, max_output_length=128):
