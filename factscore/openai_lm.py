@@ -90,7 +90,7 @@ def call_chat_model(
             received = True
 
         except Exception:
-            error = sys.exc_info()[0]
+            error = sys.exc_info()
             num_rate_errors += 1
 
             logging.error(
