@@ -10,6 +10,7 @@ from factscore.abstain_detection import is_response_abstained
 from factscore.atomic_facts import AtomicFactGenerator
 from factscore.clm import CLM
 from factscore.gpt_oss_lm import Oss
+from factscore.hf_lm import HFInf
 from factscore.npm import NPM
 from factscore.openai_lm import OpenAIModel
 from factscore.retrieval import DocDB, Retrieval
@@ -25,7 +26,9 @@ class FactScorer(object):
                  cost_estimate="consider_cache",
                  abstain_detection_type=None,
                  batch_size=256):
-        assert model_name in ["retrieval+llama", "retrieval+llama+npm", "retrieval+ChatGPT", "npm", "retrieval+ChatGPT+npm", "ChatGPT", "gpt-oss", "retrieval+gpt-oss-20b"]
+        assert model_name in ["retrieval+llama", "retrieval+llama+npm", "retrieval+ChatGPT", "npm", 
+                              "retrieval+ChatGPT+npm", "ChatGPT", "gpt-oss", "retrieval+gpt-oss-20b", 
+                              "hf-inf", "retrieval+hf-inf"]
         self.model_name = model_name
 
         self.db = {}
@@ -53,6 +56,8 @@ class FactScorer(object):
                                   key_path=openai_key)
         elif "oss" in model_name: 
             self.lm = Oss(model_name="gpt-oss-20b")
+        elif "hf" in model_name: 
+            self.lm = HFInf(model_name="hf-inf", model_id="meta-llama/Llama-3.2-3B-Instruct")
         else:
             self.lm = None
 
@@ -116,7 +121,7 @@ class FactScorer(object):
             # use the default knowledge source
             knowledge_source = "enwiki-20230401"
 
-        if knowledge_source not in self.retrieval and self.model_name not in ["ChatGPT", "gpt-oss-20b"]:
+        if knowledge_source not in self.retrieval and self.model_name not in ["ChatGPT", "gpt-oss-20b", "hf-inf"]:
             self.register_knowledge_source(knowledge_source)
         else:
             knowledge_source = None
