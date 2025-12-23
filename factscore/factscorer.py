@@ -201,15 +201,15 @@ class FactScorer(object):
             else:
                 decision = self._get_score(topic, generation, facts, sentences, knowledge_source)
                 score = np.mean([d["is_supported"] for d in decision])
-                                
-                if gamma:
-                    init_scores.append(score)
-                    penalty = 1.0 if len(facts)>gamma else np.exp(1-gamma/len(facts))
-                    score = penalty * score
+                sents = [d["sentence"] for d in decision]                
+                # if gamma:
+                #     init_scores.append(score)
+                #     penalty = 1.0 if len(facts)>gamma else np.exp(1-gamma/len(facts))
+                #     score = penalty * score
                 
                 decisions.append(decision)
                 scores.append(score)
-                score_list.append({"facts" : facts, "sentence" : sentences, "score" : score, "generation" : generation, "topic" : topic})
+                score_list.append({"facts" : facts, "sentence" : sents, "score" : score, "generation" : generation, "topic" : topic})
                 if len(scores) % 10 == 0:
                     self.save_cache()
 
@@ -222,6 +222,7 @@ class FactScorer(object):
                 "score": np.mean(scores),
                 "respond_ratio": respond_ratio,
                 "decisions": decisions,
+                "sentences" : corresponding_sentences,
                 "num_facts_per_response": np.mean([len(d) for d in decisions if d is not None])}
 
         if gamma:
