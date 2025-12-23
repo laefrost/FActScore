@@ -64,48 +64,42 @@ class OpenAIModel(LM):
 def call_chat_model(
     client,
     prompt,
-    model_name="gpt-4.1-mini",
+    model_name="gpt-4o-mini",  # Fixed model name
     max_output_tokens=512,
     temp=0.7,
 ):
     received = False
     num_rate_errors = 0
     response = None
-
+    
     while not received:
         try:
-            response = client.responses.create(
+            response = client.chat.completions.create(  # Correct method
                 model=model_name,
-                input=[
+                messages=[  # Correct parameter name
                     {
                         "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt}
-                        ]
+                        "content": prompt
                     }
                 ],
-                max_output_tokens=max_output_tokens,
+                max_tokens=max_output_tokens,  # Correct parameter name
                 temperature=temp,
             )
             received = True
-
-        except Exception:
-            error = sys.exc_info()
+        except Exception as e:
             num_rate_errors += 1
-
             logging.error(
                 "API error: %s (%d). Waiting %d sec",
-                error,
+                str(e),
                 num_rate_errors,
                 2 ** num_rate_errors
             )
             time.sleep(2 ** num_rate_errors)
-
+    
     return {
         "raw_response": response,
-        "output_text": response.output_text
+        "output_text": response.choices[0].message.content  # Correct attribute path
     }
-
 
 def call_instruct_model(
     client,
@@ -117,21 +111,18 @@ def call_instruct_model(
     received = False
     num_rate_errors = 0
     response = None
-
+    
     while not received:
         try:
-            response = client.responses.create(
+            response = client.completions.create(  # Correct method
                 model=model_name,
-                input=prompt,
-                max_output_tokens=max_output_tokens,
+                prompt=prompt,  # Correct parameter name
+                max_tokens=max_output_tokens,  # Correct parameter name
                 temperature=temp,
             )
             received = True
-
         except Exception as e:
-            error = sys.exc_info()[0]
             num_rate_errors += 1
-
             logging.error(
                 "API error: %s (%d). Waiting %d sec",
                 str(e),
@@ -139,10 +130,10 @@ def call_instruct_model(
                 2 ** num_rate_errors
             )
             time.sleep(2 ** num_rate_errors)
-
+    
     return {
         "raw_response": response,
-        "output_text": response.output_text
+        "output_text": response.choices[0].text  # Correct attribute path
     }
 
 
