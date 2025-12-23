@@ -57,7 +57,7 @@ class FactScorer(object):
         elif "oss" in model_name: 
             self.lm = Oss(model_name="gpt-oss-20b")
         elif "hf" in model_name: 
-            self.lm = HFInf(model_name="hf-inf", model_id="meta-llama/Llama-3.2-3B-Instruct")
+            self.lm = HFInf(model_name="hf-inf", model_id="meta-llama/Llama-3.2-3B-Instruct", cache_file=os.path.join(cache_dir, "hf.pkl"))
         else:
             self.lm = None
 
