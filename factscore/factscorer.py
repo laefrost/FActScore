@@ -164,7 +164,7 @@ class FactScorer(object):
                 curr_afs_og, _ = self.af_generator.run(gen)
                 # list of facts in the respective generation
                 curr_afs = [fact for _, facts in curr_afs_og for fact in facts]
-                curr_sent = [sent for sent, _ in curr_afs_og] #[sent for sents, _  in curr_afs_og for sent in sents]
+                curr_sent = [sent for sent, facts in curr_afs_og for _ in facts] #[sent for sent, _ in curr_afs_og] #[sent for sents, _  in curr_afs_og for sent in sents]
                 if len(curr_afs)==0:
                     atomic_facts.append(None)
                     corresponding_sentences.append(None)
