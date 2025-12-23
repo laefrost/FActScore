@@ -12,9 +12,6 @@ torch = "^2.0.0"
 rank-bm25 = "^0.2.2"
 spacy = "^3.5.3"
 nltk = "^3.8.1"
-sentence-transformers = "^2.2.2"
-transformers = "^4.29.2"
-openai = "^0.27.7"
 
 [build-system]
 requires = ["poetry-core"]
