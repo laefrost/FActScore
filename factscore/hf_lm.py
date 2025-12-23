@@ -15,6 +15,9 @@ class HFInf(LM):
         self.save_interval = 100
         self.model = InferenceClient(model=model_id, api_key=os.getenv('HF_TOKEN'))
         super().__init__(cache_file)
+        
+    def load_model(self):
+        self.model = InferenceClient(model=self.model_id, api_key=os.getenv('HF_TOKEN'))
 
     def _generate(self, prompt, max_sequence_length=2048, max_output_length=128):
         message = [{"role": "user", "content": prompt}]
