@@ -161,10 +161,10 @@ class FactScorer(object):
                     atomic_facts.append(None)
                     continue
                 # continue only when the response is not abstained
-                curr_afs, _ = self.af_generator.run(gen)
+                curr_afs_og, _ = self.af_generator.run(gen)
                 # list of facts in the respective generation
-                curr_afs = [fact for _, facts in curr_afs for fact in facts]
-                curr_sent = [sent for sents, _  in curr_afs for sent in sents]
+                curr_afs = [fact for _, facts in curr_afs_og for fact in facts]
+                curr_sent = [sent for sents, _  in curr_afs_og for sent in sents]
                 if len(curr_afs)==0:
                     atomic_facts.append(None)
                     corresponding_sentences.append(None)
