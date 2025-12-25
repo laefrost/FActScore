@@ -321,6 +321,8 @@ class FactScorer(object):
                     "derive the fact, separated by comma: """
                 
                 json_output = self.lm.generate(prompt=matching_prompt, response_format=format_config)
+                logging.critical("Hi")
+                logging.critical(json_output)
                 match_data = json.loads(json_output)
                 match_words = match_data["matches"]
                 matched_word_indices = self._match_string(generation, sent, match_words)
