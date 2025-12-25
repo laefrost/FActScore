@@ -311,14 +311,18 @@ class FactScorer(object):
                         "strict": True
                     }
                 }
+                pattern = r"\(|\)|[0-9]+(?:[.,-][0-9]+)*|[A-Za-zÀ-ÖØ-öø-ÿ]+(?:[-'][A-Za-zÀ-ÖØ-öø-ÿ]+)*|[.,;?!:]|\n|</s>|'|\"|`|´|-"
+                generation_words = re.findall(pattern, sent)
                 
                 matching_prompt = f"""Given the fact, identify the corresponding words "
-                    "in the original sentence that help derive this fact. "
-                    "Please list all words that are related to the fact, "
+                    "in the original sentence that help derive this fact."
+                    "Please list all words within the original sentence that are related to the fact, "
                     "in the order they appear in the original sentence, "
-                    "each word separated by comma.\nFact: {atom}\n"
-                    "Sentence: {sent}\nWords from sentence that helps to "
-                    "derive the fact, separated by comma: """
+                    "each word separated by comma."
+                    "\nFact: {atom}\n"
+                    "Sentence: {sent}\n"
+                    "Words within the sentence: {generation_words}"
+                    Words within sentence that helps to derive the fact, in the original order, separated by comma: """
                 
                 output, response = self.lm.generate(prompt=matching_prompt, response_format=format_config)
                 match_data = json.loads(output)
