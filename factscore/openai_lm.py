@@ -90,24 +90,23 @@ def call_chat_model(
                 )
                 output_text = response.choices[0].message.content
             else: 
-                response = client.responses.create(
-                    model="gpt-4o-2024-08-06",
-                    input=[
-                        {"role": "user", "content": prompt}
+                # response = client.responses.create(
+                #     model=model_name,
+                #     input=[
+                #         {"role": "user", "content": prompt}
+                #     ],
+                #     text = response_format
+                # )
+                # output_text = response.output_text
+                response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    # {"role": "system", "content": "You are a helpful math tutor. Guide the user through the solution step by step."},
+                    {"role": "user", "content": prompt}
                     ],
-                    text = response_format
+                    response_format=response_format,
                 )
-                output_text = response.output_text
-            # else: 
-            #     response = client.chat.completions.create(
-            #     model=model_name,
-            #     messages=[
-            #         # {"role": "system", "content": "You are a helpful math tutor. Guide the user through the solution step by step."},
-            #         {"role": "user", "content": prompt}
-            #     ],
-            #     response_format=response_format,
-            #     )
-            #     output_text = response.choices[0].message.content
+                output_text = response.choices[0].message.content
             received = True
             logging.critical(response)
         except Exception as e:
