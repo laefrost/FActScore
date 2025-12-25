@@ -31,7 +31,7 @@ class OpenAIModel(LM):
         self.client = OpenAI()
         self.model = self.model_name
 
-    def _generate(self, prompt, max_sequence_length=2048, max_output_length=128):
+    def _generate(self, prompt, max_sequence_length=2048, max_output_length=128, response_format = None):
         if self.add_n % self.save_interval == 0:
             self.save_cache()
 
@@ -41,7 +41,8 @@ class OpenAIModel(LM):
                 prompt=prompt,
                 model_name="gpt-4.1-mini",
                 temp=self.temp,
-                max_output_tokens=max_output_length
+                max_output_tokens=max_output_length,
+                response_format=response_format
             )
             output = response["output_text"]
             return output, response
@@ -67,6 +68,7 @@ def call_chat_model(
     model_name="gpt-4o-mini",  # Fixed model name
     max_output_tokens=512,
     temp=0.7,
+    response_format = None
 ):
     received = False
     num_rate_errors = 0
@@ -84,7 +86,19 @@ def call_chat_model(
                 ],
                 max_tokens=max_output_tokens,  # Correct parameter name
                 temperature=temp,
+                response_format = response_format
             )
+            output_text = response.choices[0].message.content
+            # else: 
+            #     response = client.chat.completions.create(
+            #     model=model_name,
+            #     messages=[
+            #         # {"role": "system", "content": "You are a helpful math tutor. Guide the user through the solution step by step."},
+            #         {"role": "user", "content": prompt}
+            #     ],
+            #     response_format=response_format,
+            #     )
+            #     output_text = response.choices[0].message.content
             received = True
         except Exception as e:
             num_rate_errors += 1
@@ -98,7 +112,7 @@ def call_chat_model(
     
     return {
         "raw_response": response,
-        "output_text": response.choices[0].message.content  # Correct attribute path
+        "output_text": output_text  # Correct attribute path
     }
 
 def call_instruct_model(

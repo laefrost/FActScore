@@ -4,6 +4,8 @@ import json
 import numpy as np
 import os
 import logging
+from pydantic import BaseModel
+
 
 from tqdm import tqdm
 from factscore.abstain_detection import is_response_abstained
@@ -112,6 +114,9 @@ class FactScorer(object):
     def get_score(self,
                   topics,
                   generations,
+                  generated_words, 
+                  generated_tokens,
+                  generated_ids,
                   gamma=10,
                   atomic_facts=None,
                   knowledge_source=None,
@@ -230,7 +235,7 @@ class FactScorer(object):
         
         return out
 
-    def _get_score(self, topic, generation, atomic_facts, sentences, knowledge_source = None, cost_estimate=None):
+    def _get_score(self, topic, generation, atomic_facts, sentences, knowledge_source = None, cost_estimate=None, do_matching = True):
         decisions = []
         total_words = 0
         for atom, sent in zip(atomic_facts, sentences):
@@ -285,13 +290,96 @@ class FactScorer(object):
                 npprob = self.npm[knowledge_source].get_probabilty(topic, atom)
                 is_supported = npprob > 0.3
 
-            decisions.append({"atom": atom, "is_supported": is_supported, "sentence" : sent})
+            if do_matching: 
+                # class MathReasoning(BaseModel):
+                #     steps: list[str]
+                import re
+                format_config = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "matching_response",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "matches": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                }
+                            },
+                            "required": ["matches"],
+                            "additionalProperties": False
+                        },
+                        "strict": True
+                    }
+                }
+                
+                matching_prompt = f"""Given the fact, identify the corresponding words "
+                    "in the original sentence that help derive this fact. "
+                    "Please list all words that are related to the fact, "
+                    "in the order they appear in the original sentence, "
+                    "each word separated by comma.\nFact: {atom}\n"
+                    "Sentence: {sent}\nWords from sentence that helps to "
+                    "derive the fact, separated by comma: """
+                
+                json_output = self.lm.generate(prompt=matching_prompt, response_format=format_config)
+                match_data = json.loads(json_output)
+                match_words = match_data["matches"]
+                matched_word_indices = self._match_string(generation, sent, match_words)
+            
+            decisions.append({"atom": atom, 
+                              "is_supported": is_supported, 
+                              "sentence" : sent, 
+                              "matched_word_indices" : matched_word_indices})
 
         if cost_estimate:
             return total_words
         else:
             return decisions
+        
+    def _match_string(self, generation, sentence, matched_words): 
+        import itertools
+        from collections import defaultdict
+        import re
 
+        def find_consecutive_indices(haystack, needle):
+            n = len(needle)
+            for i in range(len(haystack) - n + 1):
+                if haystack[i:i+n] == needle:
+                    return list(range(i, i+n))
+            return None
+        
+        # get generated words
+        pattern = r"\(|\)|[0-9]+(?:[.,-][0-9]+)*|[A-Za-zÀ-ÖØ-öø-ÿ]+(?:[-'][A-Za-zÀ-ÖØ-öø-ÿ]+)*|[.,;?!:]|\n|</s>|'|\"|`|´|-"
+        generation_words = re.findall(pattern, generation)
+        sentence_words = re.findall(pattern, sentence)
+        
+        sentence_indices = find_consecutive_indices(generation_words, sentence_words)
+        word_indices = defaultdict(list)
+        word_set = set(matched_words)
+        
+        for word, index in zip(sentence_words, sentence_indices):
+            if word in word_set:
+                word_indices[word].append(index)
+        
+        word_indices = dict(word_indices)
+        word_indices_list = word_indices.values()
+        
+        cart_prod = itertools.product(*word_indices_list)
+        last_diff = float('inf')
+        final_indices = None
+        for element in cart_prod:
+            #if element.sort() == element: 
+            diff = np.diff(element)
+            if any(n < 0 for n in diff):
+                continue
+            if diff < last_diff: 
+                last_diff = diff
+                final_indices = element   
+        
+        return final_indices   
+        
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()

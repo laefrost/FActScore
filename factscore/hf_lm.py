@@ -19,7 +19,7 @@ class HFInf(LM):
     def load_model(self):
         self.model = InferenceClient(model=self.model_id, api_key=os.getenv('HF_TOKEN'))
 
-    def _generate(self, prompt, max_sequence_length=2048, max_output_length=128):
+    def _generate(self, prompt, max_sequence_length=2048, max_output_length=128, response_format = None):
         message = [{"role": "user", "content": prompt}]
         out = self.model.chat_completion(
             messages = message,
