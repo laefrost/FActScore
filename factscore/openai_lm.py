@@ -76,19 +76,28 @@ def call_chat_model(
     
     while not received:
         try:
-            response = client.chat.completions.create(  # Correct method
-                model=model_name,
-                messages=[  # Correct parameter name
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                max_tokens=max_output_tokens,  # Correct parameter name
-                temperature=temp,
-                response_format = response_format
-            )
-            output_text = response.choices[0].message.content
+            if response_format is None: 
+                response = client.chat.completions.create(  # Correct method
+                    model=model_name,
+                    messages=[  # Correct parameter name
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    max_tokens=max_output_tokens,  # Correct parameter name
+                    temperature=temp,
+                )
+                output_text = response.choices[0].message.content
+            else: 
+                response = client.responses.create(
+                    model="gpt-4o-2024-08-06",
+                    input=[
+                        {"role": "user", "content": prompt}
+                    ],
+                    text = response_format
+                )
+                output_text = response.output_text
             # else: 
             #     response = client.chat.completions.create(
             #     model=model_name,
