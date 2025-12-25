@@ -145,10 +145,10 @@ class FactScorer(object):
 
             # estimate the total cost of atomic fact generation
             total_words = 0
-            for gen in generations:
-                total_words += self.af_generator.run(gen, cost_estimate=self.cost_estimate)
+            #for gen in generations:
+            #    total_words += self.af_generator.run(gen, cost_estimate=self.cost_estimate)
 
-            self.print_cost_estimates(total_words, task="atomic fact generation", model="davinci-003")
+            # self.print_cost_estimates(total_words, task="atomic fact generation", model="davinci-003")
 
             if verbose:
                 topics = tqdm(topics)
@@ -181,14 +181,14 @@ class FactScorer(object):
 
         respond_ratio = np.mean([facts is not None for facts in atomic_facts])
 
-        if "ChatGPT" in self.model_name:
-            # estimate the total cost of response generation
-            total_words = 0
-            for topic, generation, facts in zip(topics, generations, atomic_facts):
-                if facts is not None:
-                    total_words += self._get_score(topic, generation, facts, knowledge_source, cost_estimate=self.cost_estimate)
+        # if "ChatGPT" in self.model_name:
+        #     # estimate the total cost of response generation
+        #     total_words = 0
+        #     for topic, generation, facts in zip(topics, generations, atomic_facts):
+        #         if facts is not None:
+        #             total_words += self._get_score(topic, generation, facts, knowledge_source, cost_estimate=self.cost_estimate)
 
-            self.print_cost_estimates(total_words, task="factscore evaluation", model="gpt-3.5-turbo")
+        #     self.print_cost_estimates(total_words, task="factscore evaluation", model="gpt-3.5-turbo")
 
         if verbose:
             topics = tqdm(topics)
@@ -324,6 +324,7 @@ class FactScorer(object):
                 logging.critical("Hi")
                 logging.critical(json_output)
                 match_data = json.loads(json_output)
+                logging.critical(json_output)
                 match_words = match_data["matches"]
                 matched_word_indices = self._match_string(generation, sent, match_words)
             

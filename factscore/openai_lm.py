@@ -39,7 +39,7 @@ class OpenAIModel(LM):
             response = call_chat_model(
                 client=self.client,
                 prompt=prompt,
-                model_name="gpt-4.1-mini",
+                model_name="gpt-4o-mini",
                 temp=self.temp,
                 max_output_tokens=max_output_length,
                 response_format=response_format
