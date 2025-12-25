@@ -331,6 +331,7 @@ class FactScorer(object):
             decisions.append({"atom": atom, 
                               "is_supported": is_supported, 
                               "sentence" : sent, 
+                              "matched_words" : match_words, 
                               "matched_word_indices" : matched_word_indices})
 
         if cost_estimate:
