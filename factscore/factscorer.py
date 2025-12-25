@@ -321,10 +321,8 @@ class FactScorer(object):
                     "derive the fact, separated by comma: """
                 
                 output, response = self.lm.generate(prompt=matching_prompt, response_format=format_config)
-                logging.critical("Hi")
-                logging.critical(output)
                 match_data = json.loads(output)
-                logging.critical(match_data)
+                logging.info(match_data)
                 match_words = match_data["matches"]
                 matched_word_indices = self._match_string(generation, sent, match_words)
             
@@ -375,7 +373,7 @@ class FactScorer(object):
             diff = np.diff(element)
             if any(n < 0 for n in diff):
                 continue
-            if diff < last_diff: 
+            if sum(diff) < last_diff: 
                 last_diff = diff
                 final_indices = element   
         

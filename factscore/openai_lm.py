@@ -108,7 +108,6 @@ def call_chat_model(
                 )
                 output_text = response.choices[0].message.content
             received = True
-            logging.critical(response)
         except Exception as e:
             num_rate_errors += 1
             logging.error(
