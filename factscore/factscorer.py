@@ -378,7 +378,7 @@ class FactScorer(object):
             if any(n < 0 for n in diff):
                 continue
             if sum(diff) < last_diff: 
-                last_diff = diff
+                last_diff = sum(diff)
                 final_indices = element   
         
         return final_indices   
