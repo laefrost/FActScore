@@ -114,6 +114,8 @@ class FactScorer(object):
     def get_score(self,
                   topics,
                   generations,
+                  true_answers = None, 
+                  questions = None, 
                   gamma=10,
                   atomic_facts=None,
                   knowledge_source=None,
@@ -197,23 +199,42 @@ class FactScorer(object):
         score_list = []
         init_scores = []
         decisions = []
-        for topic, generation, facts, sentences in zip(topics, generations, atomic_facts, corresponding_sentences):
-            if facts is None:
-                decisions.append(None)
-            else:
-                decision = self._get_score(topic, generation, facts, sentences, knowledge_source)
-                score = np.mean([d["is_supported"] for d in decision])
-                sents = [d["sentence"] for d in decision]                
-                # if gamma:
-                #     init_scores.append(score)
-                #     penalty = 1.0 if len(facts)>gamma else np.exp(1-gamma/len(facts))
-                #     score = penalty * score
-                
-                decisions.append(decision)
-                scores.append(score)
-                score_list.append({"facts" : facts, "sentence" : sents, "score" : score, "generation" : generation, "topic" : topic})
-                if len(scores) % 10 == 0:
-                    self.save_cache()
+        if questions is not None and true_answers is not None:
+            for topic, generation, facts, sentences, true_answer, question in zip(topics, generations, atomic_facts, corresponding_sentences, true_answers, questions):
+                if facts is None:
+                    decisions.append(None)
+                else:
+                    decision = self._get_score(topic, generation, facts, sentences, knowledge_source, true_answer=true_answer, question=question)
+                    score = np.mean([d["is_supported"] for d in decision])
+                    sents = [d["sentence"] for d in decision]                
+                    # if gamma:
+                    #     init_scores.append(score)
+                    #     penalty = 1.0 if len(facts)>gamma else np.exp(1-gamma/len(facts))
+                    #     score = penalty * score
+                    
+                    decisions.append(decision)
+                    scores.append(score)
+                    score_list.append({"facts" : facts, "sentence" : sents, "score" : score, "generation" : generation, "topic" : topic})
+                    if len(scores) % 10 == 0:
+                        self.save_cache()
+        else:
+            for topic, generation, facts, sentences in zip(topics, generations, atomic_facts, corresponding_sentences):
+                if facts is None:
+                    decisions.append(None)
+                else:
+                    decision = self._get_score(topic, generation, facts, sentences, knowledge_source)
+                    score = np.mean([d["is_supported"] for d in decision])
+                    sents = [d["sentence"] for d in decision]                
+                    # if gamma:
+                    #     init_scores.append(score)
+                    #     penalty = 1.0 if len(facts)>gamma else np.exp(1-gamma/len(facts))
+                    #     score = penalty * score
+                    
+                    decisions.append(decision)
+                    scores.append(score)
+                    score_list.append({"facts" : facts, "sentence" : sents, "score" : score, "generation" : generation, "topic" : topic})
+                    if len(scores) % 10 == 0:
+                        self.save_cache()
 
         self.save_cache()
 
@@ -232,7 +253,7 @@ class FactScorer(object):
         
         return out
 
-    def _get_score(self, topic, generation, atomic_facts, sentences, knowledge_source = None, cost_estimate=None, do_matching = True):
+    def _get_score(self, topic, generation, atomic_facts, sentences, knowledge_source = None, cost_estimate=None, do_matching = True, true_answer = None, question = None):
         decisions = []
         total_words = 0
         for atom, sent in zip(atomic_facts, sentences):
@@ -249,7 +270,10 @@ class FactScorer(object):
                         definition += "."
                     prompt = "{}\n\nInput: {} True or False?\nOutput:".format(definition.strip(), atom.strip())
                 else: 
-                    prompt = "Input: {} True or False?\nOutput:".format(atom.strip())
+                    prompt = f"""You are given a derived fact from an answer to the question {question}.
+                    The true answer is {true_answer}. 
+                    \nBased on this and your own knowledge, determine if the fact is true or false.
+                    \nDerived Fact: {atom} True or False?\nOutput:"""
                     
                 if cost_estimate:
                     if cost_estimate == "consider_cache" and (prompt.strip() + "_0") not in self.lm.cache_dict:
