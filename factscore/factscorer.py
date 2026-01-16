@@ -264,6 +264,7 @@ class FactScorer(object):
     def _get_score(self, topic, generation, atomic_facts, sentences, knowledge_source = None, cost_estimate=None, do_matching = True, true_answer = None, question = None):
         decisions = []
         total_words = 0
+        print('length in _get_score',len(atomic_facts), len(sentences))
         for atom, sent in zip(atomic_facts, sentences):
             atom = atom.strip()
             if self.lm:
