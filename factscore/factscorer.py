@@ -140,6 +140,7 @@ class FactScorer(object):
             assert len(topics)==len(generations), "`topics` and `generations` should have the same length"
 
         if atomic_facts is not None:
+            print("Got atomic facts")
             assert len(topics)==len(atomic_facts), "`topics` and `atomic_facts` should have the same length"
             corresponding_sentences = atomic_facts
             do_matching = False
@@ -204,6 +205,8 @@ class FactScorer(object):
         score_list = []
         init_scores = []
         decisions = []
+        print('length atomic facts: ', len(atomic_facts))
+        print('length sentences: ', len(corresponding_sentences))
         if questions is not None and true_answers is not None:
             for topic, generation, facts, sentences, true_answer, question in zip(topics, generations, atomic_facts, corresponding_sentences, true_answers, questions):
                 if facts is None:
