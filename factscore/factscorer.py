@@ -359,7 +359,7 @@ class FactScorer(object):
                 matched_word_indices = self._match_string(generation, sent, match_words)
             else: 
                 match_words = generation_words
-                matched_word_indices = list(range(generation_words))
+                matched_word_indices = list(range(len(generation_words)))
             
             decisions.append({"atom": atom, 
                               "is_supported": is_supported, 
