@@ -139,7 +139,10 @@ class FactScorer(object):
 
         if atomic_facts is not None:
             assert len(topics)==len(atomic_facts), "`topics` and `atomic_facts` should have the same length"
+            corresponding_sentences = atomic_facts
+            do_matching = False
         else:
+            do_matching = True
             if self.af_generator is None:
                 self.af_generator = AtomicFactGenerator(key_path=self.openai_key,
                                                         demon_dir=os.path.join(self.data_dir, "demos"),
@@ -204,7 +207,7 @@ class FactScorer(object):
                 if facts is None:
                     decisions.append(None)
                 else:
-                    decision = self._get_score(topic, generation, facts, sentences, knowledge_source, true_answer=true_answer, question=question)
+                    decision = self._get_score(topic, generation, facts, sentences, knowledge_source, true_answer=true_answer, question=question, do_matching=do_matching)
                     score = np.mean([d["is_supported"] for d in decision])
                     sents = [d["sentence"] for d in decision]                
                     # if gamma:
@@ -222,7 +225,7 @@ class FactScorer(object):
                 if facts is None:
                     decisions.append(None)
                 else:
-                    decision = self._get_score(topic, generation, facts, sentences, knowledge_source)
+                    decision = self._get_score(topic, generation, facts, sentences, knowledge_source, do_matching=do_matching)
                     score = np.mean([d["is_supported"] for d in decision])
                     sents = [d["sentence"] for d in decision]                
                     # if gamma:
@@ -270,9 +273,9 @@ class FactScorer(object):
                         definition += "."
                     prompt = "{}\n\nInput: {} True or False?\nOutput:".format(definition.strip(), atom.strip())
                 else: 
-                    prompt = f"""You are given a derived fact from an answer to the question {question}.
-                    The true answer is {true_answer}. 
-                    \nBased on this and your own knowledge, determine if the fact is true or false.
+                    prompt = f"""You are given a generated answer, a derived fact from the generated answer to the question {question}.
+                    \nBased on your own knowledge, determine if the derived fact is true or false.
+                    \nGenerated answer: {generation}
                     \nDerived Fact: {atom} True or False?\nOutput:"""
                     
                 if cost_estimate:
@@ -310,7 +313,9 @@ class FactScorer(object):
             if is_supported and "npm" in self.model_name:
                 npprob = self.npm[knowledge_source].get_probabilty(topic, atom)
                 is_supported = npprob > 0.3
-
+                
+            pattern = r"\(|\)|[0-9]+(?:[.,-][0-9]+)*|[A-Za-zÀ-ÖØ-öø-ÿ]+(?:[-'][A-Za-zÀ-ÖØ-öø-ÿ]+)*|[.,;?!:]|\n|</s>|'|\"|`|´|-"
+            generation_words = re.findall(pattern, sent)
             if do_matching: 
                 # class MathReasoning(BaseModel):
                 #     steps: list[str]
@@ -335,8 +340,6 @@ class FactScorer(object):
                         "strict": True
                     }
                 }
-                pattern = r"\(|\)|[0-9]+(?:[.,-][0-9]+)*|[A-Za-zÀ-ÖØ-öø-ÿ]+(?:[-'][A-Za-zÀ-ÖØ-öø-ÿ]+)*|[.,;?!:]|\n|</s>|'|\"|`|´|-"
-                generation_words = re.findall(pattern, sent)
                 
                 matching_prompt = f"""Given the fact, identify the corresponding words "
                     "in the original sentence that help derive this fact."
@@ -353,6 +356,9 @@ class FactScorer(object):
                 logging.info(match_data)
                 match_words = match_data["matches"]
                 matched_word_indices = self._match_string(generation, sent, match_words)
+            else: 
+                match_words = generation_words
+                matched_word_indices = list(range(generation_words))
             
             decisions.append({"atom": atom, 
                               "is_supported": is_supported, 

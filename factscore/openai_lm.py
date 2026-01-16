@@ -39,7 +39,7 @@ class OpenAIModel(LM):
             response = call_chat_model(
                 client=self.client,
                 prompt=prompt,
-                model_name="gpt-4o-mini",
+                model_name="gpt-5-mini",
                 temp=self.temp,
                 max_output_tokens=max_output_length,
                 response_format=response_format
@@ -77,36 +77,38 @@ def call_chat_model(
     while not received:
         try:
             if response_format is None: 
-                response = client.chat.completions.create(  # Correct method
+                response = client.responses.create(
                     model=model_name,
-                    messages=[  # Correct parameter name
+                    input= [  # Correct parameter name
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ]
+                )
+                output_text = response.output_text
+            else: 
+                response = client.responses.create(
+                    model=model_name,
+                    input= [  # Correct parameter name
                         {
                             "role": "user",
                             "content": prompt
                         }
                     ],
-                    max_tokens=max_output_tokens,  # Correct parameter name
-                    temperature=temp,
+                    text = {
+                        "format" : response_format}
                 )
-                output_text = response.choices[0].message.content
-            else: 
-                # response = client.responses.create(
-                #     model=model_name,
-                #     input=[
-                #         {"role": "user", "content": prompt}
+                output_text = response.output_text
+                # response = client.chat.completions.create(
+                # model=model_name,
+                # messages=[
+                #     # {"role": "system", "content": "You are a helpful math tutor. Guide the user through the solution step by step."},
+                #     {"role": "user", "content": prompt}
                 #     ],
-                #     text = response_format
+                #     response_format=response_format,
                 # )
-                # output_text = response.output_text
-                response = client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    # {"role": "system", "content": "You are a helpful math tutor. Guide the user through the solution step by step."},
-                    {"role": "user", "content": prompt}
-                    ],
-                    response_format=response_format,
-                )
-                output_text = response.choices[0].message.content
+                # output_text = response.choices[0].message.content
             received = True
         except Exception as e:
             num_rate_errors += 1

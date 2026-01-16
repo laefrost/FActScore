@@ -26,6 +26,6 @@ class HFInf(LM):
             temperature=self.temp,        
             top_p=0.9,
             )
-        return out.choices[0].message["content"]
+        return out.choices[0].message["content"], out
 
 
