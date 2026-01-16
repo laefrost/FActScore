@@ -16,6 +16,8 @@ from factscore.hf_lm import HFInf
 from factscore.npm import NPM
 from factscore.openai_lm import OpenAIModel
 from factscore.retrieval import DocDB, Retrieval
+import re
+
 
 class FactScorer(object):
 
@@ -319,7 +321,6 @@ class FactScorer(object):
             if do_matching: 
                 # class MathReasoning(BaseModel):
                 #     steps: list[str]
-                import re
                 format_config = {
                     "type": "json_schema",
                     "json_schema": {
