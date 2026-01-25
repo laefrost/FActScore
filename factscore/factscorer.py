@@ -326,10 +326,9 @@ class FactScorer(object):
                 # class MathReasoning(BaseModel):
                 #     steps: list[str]
                 format_config = {
+                    "name" : "matching_response",
                     "type": "json_schema",
-                    "json_schema": {
-                        "name": "matching_response",
-                        "schema": {
+                    "schema": {
                             "type": "object",
                             "properties": {
                                 "matches": {
@@ -341,8 +340,6 @@ class FactScorer(object):
                             },
                             "required": ["matches"],
                             "additionalProperties": False
-                        },
-                        "strict": True
                     }
                 }
                 
