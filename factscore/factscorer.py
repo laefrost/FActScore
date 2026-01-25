@@ -121,7 +121,8 @@ class FactScorer(object):
                   gamma=10,
                   atomic_facts=None,
                   knowledge_source=None,
-                  verbose=False):
+                  verbose=False, 
+                  do_matching = False):
         
         if knowledge_source is None:
             # use the default knowledge source
@@ -143,9 +144,7 @@ class FactScorer(object):
             print("Got atomic facts")
             assert len(topics)==len(atomic_facts), "`topics` and `atomic_facts` should have the same length"
             corresponding_sentences = atomic_facts
-            do_matching = False
         else:
-            do_matching = True
             if self.af_generator is None:
                 self.af_generator = AtomicFactGenerator(key_path=self.openai_key,
                                                         demon_dir=os.path.join(self.data_dir, "demos"),
