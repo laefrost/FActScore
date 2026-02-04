@@ -135,7 +135,7 @@ class FactScorer(object):
             # use the default knowledge source
             knowledge_source = "enwiki-20230401"
 
-        if knowledge_source not in  self.retrieval and self.model_name not in ["ChatGPT", "gpt-oss-20b", "hf-inf"]:
+        if knowledge_source not in  self.retrieval and self.model_name not in ["ChatGPT", "gpt-oss-20b", "hf-inf", "gpt-4o-mini", "gpt-5-mini"]:
             self.register_knowledge_source(knowledge_source)
         else:
             knowledge_source = None
