@@ -127,7 +127,9 @@ class FactScorer(object):
                   atomic_facts=None,
                   knowledge_source=None,
                   verbose=False, 
-                  do_matching = False):
+                  do_matching = False, 
+                  gen_tokens = None, 
+                  gen_words = None):
         
         if knowledge_source is None:
             # use the default knowledge source
@@ -211,43 +213,32 @@ class FactScorer(object):
         decisions = []
         print('length atomic facts: ', len(atomic_facts))
         print('length sentences: ', len(corresponding_sentences))
-        if questions is not None and true_answers is not None:
-            for topic, generation, facts, sentences, true_answer, question in zip(topics, generations, atomic_facts, corresponding_sentences, true_answers, questions):
-                if facts is None:
-                    decisions.append(None)
-                else:
-                    decision = self._get_score(topic, generation, facts, sentences, knowledge_source, true_answer=true_answer, question=question, do_matching=do_matching)
-                    score = np.mean([d["is_supported"] for d in decision])
-                    sents = [d["sentence"] for d in decision]                
-                    # if gamma:
-                    #     init_scores.append(score)
-                    #     penalty = 1.0 if len(facts)>gamma else np.exp(1-gamma/len(facts))
-                    #     score = penalty * score
-                    
-                    decisions.append(decision)
-                    scores.append(score)
-                    score_list.append({"facts" : facts, "sentence" : sents, "score" : score, "generation" : generation, "topic" : topic})
-                    if len(scores) % 10 == 0:
-                        self.save_cache()
-        else:
-            for topic, generation, facts, sentences in zip(topics, generations, atomic_facts, corresponding_sentences):
-                if facts is None:
-                    decisions.append(None)
-                else:
-                    decision = self._get_score(topic, generation, facts, sentences, knowledge_source, do_matching=do_matching)
-                    score = np.mean([d["is_supported"] for d in decision])
-                    sents = [d["sentence"] for d in decision]                
-                    # if gamma:
-                    #     init_scores.append(score)
-                    #     penalty = 1.0 if len(facts)>gamma else np.exp(1-gamma/len(facts))
-                    #     score = penalty * score
-                    
-                    decisions.append(decision)
-                    scores.append(score)
-                    score_list.append({"facts" : facts, "sentence" : sents, "score" : score, "generation" : generation, "topic" : topic})
-                    if len(scores) % 10 == 0:
-                        self.save_cache()
-
+        
+        if questions is None: 
+            questions = [None] * len(generations)
+        if true_answers is None: 
+            true_answers = [None] * len(generations)
+        if gen_words is None: 
+            true_answers = [None] * len(generations)
+        
+        
+        for topic, generation, facts, sentences, true_answer, question, gen_word in zip(topics, generations, atomic_facts, corresponding_sentences, true_answers, questions, gen_words):
+            if facts is None:
+                decisions.append(None)
+            else:
+                decision = self._get_score(topic, generation, facts, sentences, knowledge_source, true_answer=true_answer, question=question, do_matching=do_matching, gen_words=gen_word)
+                score = np.mean([d["is_supported"] for d in decision])
+                sents = [d["sentence"] for d in decision]                
+                # if gamma:
+                #     init_scores.append(score)
+                #     penalty = 1.0 if len(facts)>gamma else np.exp(1-gamma/len(facts))
+                #     score = penalty * score
+                
+                decisions.append(decision)
+                scores.append(score)
+                score_list.append({"facts" : facts, "sentence" : sents, "score" : score, "generation" : generation, "topic" : topic})
+                if len(scores) % 10 == 0:
+                    self.save_cache()
         self.save_cache()
 
         out = { 
@@ -265,7 +256,7 @@ class FactScorer(object):
         
         return out
 
-    def _get_score(self, topic, generation, atomic_facts, sentences, knowledge_source = None, cost_estimate=None, do_matching = True, true_answer = None, question = None):
+    def _get_score(self, topic, generation, atomic_facts, sentences, knowledge_source = None, cost_estimate=None, do_matching = False, true_answer = None, question = None, gen_tokens = None, gen_words = None):
         decisions = []
         total_words = 0
         print('length in _get_score',len(atomic_facts), len(sentences))
@@ -324,8 +315,6 @@ class FactScorer(object):
                 npprob = self.npm[knowledge_source].get_probabilty(topic, atom)
                 is_supported = npprob > 0.3
                 
-            pattern = r"\(|\)|[0-9]+(?:[.,-][0-9]+)*|[A-Za-zÀ-ÖØ-öø-ÿ]+(?:[-'][A-Za-zÀ-ÖØ-öø-ÿ]+)*|[.,;?!:]|\n|</s>|'|\"|`|´|-"
-            generation_words = re.findall(pattern, sent)
             if do_matching: 
                 # class MathReasoning(BaseModel):
                 #     steps: list[str]
@@ -354,7 +343,7 @@ class FactScorer(object):
                     "each word separated by comma."
                     "\nFact: {atom}\n"
                     "Sentence: {sent}\n"
-                    "Words within the sentence: {generation_words}"
+                    "Words within the sentence: {gen_words}"
                     Words within sentence that helps to derive the fact, in the original order, separated by comma: """
                 
                 output, response = self.lm.generate(prompt=matching_prompt, response_format=format_config)
@@ -363,8 +352,8 @@ class FactScorer(object):
                 match_words = match_data["matches"]
                 matched_word_indices = self._match_string(generation, sent, match_words)
             else: 
-                match_words = generation_words
-                matched_word_indices = list(range(len(generation_words)))
+                match_words = gen_words
+                matched_word_indices = list(range(len(gen_words)))
             
             decisions.append({"atom": atom, 
                               "is_supported": is_supported, 
