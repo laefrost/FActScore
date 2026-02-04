@@ -22,7 +22,7 @@ import re
 class FactScorer(object):
 
     def __init__(self,
-                 model_name="retrieval+gpt-oss-20b",
+                 model_name="retrieval+gpt-4o-mini",
                  data_dir=".cache/factscore",
                  model_dir=".cache/factscore",
                  cache_dir=".cache/factscore",
@@ -32,7 +32,8 @@ class FactScorer(object):
                  batch_size=256):
         assert model_name in ["retrieval+llama", "retrieval+llama+npm", "retrieval+ChatGPT", "npm", 
                               "retrieval+ChatGPT+npm", "ChatGPT", "gpt-oss", "retrieval+gpt-oss-20b", 
-                              "hf-inf", "retrieval+hf-inf"]
+                              "hf-inf", "retrieval+hf-inf", "gpt-4o-mini", "gpt-5-mini",
+                              "retrieval+gpt-4o-mini", "retrieval+gpt-5-mini"]
         self.model_name = model_name
 
         self.db = {}
@@ -60,6 +61,10 @@ class FactScorer(object):
                                   key_path=openai_key)
         elif "oss" in model_name: 
             self.lm = Oss(model_name="gpt-oss-20b")
+        elif "gpt" in model_name: 
+            self.lm = OpenAIModel(model_name=model_name,
+                                  cache_file=os.path.join(cache_dir, "ChatGPT.pkl"),
+                                  key_path=openai_key)
         elif "hf" in model_name: 
             self.lm = HFInf(model_name="hf-inf", model_id="meta-llama/Llama-3.2-3B-Instruct", cache_file=os.path.join(cache_dir, "hf.pkl"))
         else:
@@ -128,7 +133,7 @@ class FactScorer(object):
             # use the default knowledge source
             knowledge_source = "enwiki-20230401"
 
-        if knowledge_source not in self.retrieval and self.model_name not in ["ChatGPT", "gpt-oss-20b", "hf-inf"]:
+        if knowledge_source not in  self.retrieval and self.model_name not in ["ChatGPT", "gpt-oss-20b", "hf-inf"]:
             self.register_knowledge_source(knowledge_source)
         else:
             knowledge_source = None

@@ -35,11 +35,35 @@ class OpenAIModel(LM):
         if self.add_n % self.save_interval == 0:
             self.save_cache()
 
-        if self.model_name == "ChatGPT":
+        if "ChatGPT" in self.model_name:
             response = call_chat_model(
                 client=self.client,
                 prompt=prompt,
                 model_name="gpt-5-mini",
+                temp=self.temp,
+                max_output_tokens=max_output_length,
+                response_format=response_format
+            )
+            output = response["output_text"]
+            return output, response
+        
+        elif "gpt-5-mini" in self.model_name:
+            response = call_chat_model(
+                client=self.client,
+                prompt=prompt,
+                model_name="gpt-5-mini",
+                temp=self.temp,
+                max_output_tokens=max_output_length,
+                response_format=response_format
+            )
+            output = response["output_text"]
+            return output, response
+        
+        elif "gpt-4o-mini" in self.model_name:
+            response = call_chat_model(
+                client=self.client,
+                prompt=prompt,
+                model_name="gpt-4o-mini",
                 temp=self.temp,
                 max_output_tokens=max_output_length,
                 response_format=response_format
