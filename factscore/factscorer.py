@@ -376,7 +376,7 @@ class FactScorer(object):
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         
         found = False
-        print("Sentence ", sentence)
+        print("Sentence ", sentence, generated_words)
         for e, element in enumerate(generated_words): 
             for i in range(e+1 , len(generated_words)+1): 
                 ids_tokens = list(itertools.chain.from_iterable(word_tokens[e:i]))
