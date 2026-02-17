@@ -376,36 +376,22 @@ class FactScorer(object):
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         
         found = False
-        print("Sentence ", sentence, generated_words)
-        print("tokens ", word_tokens)
         for e, element in enumerate(generated_words): 
-            print(e, element)
             for i in range(e+1 , len(generated_words)+1): 
                 ids_tokens = list(itertools.chain.from_iterable(word_tokens[e:i]))
-                # text = ' '.join(generated_words[e:i])
                 text_tokens = tokenizer.convert_ids_to_tokens(ids_tokens, skip_special_tokens=False)
                 text = tokenizer.convert_tokens_to_string(text_tokens)
-                
-                print(ids_tokens, text_tokens, text)
-                
-                #print(text, "|", sentence)
-                #print(len(text), len(sentence))
-                #print(ids_tokens)
                 if text in sentence: 
                     sentence_indices = list(range(e, i))
                     sentence_words = generated_words[e:i]
-                    print("Text ", text)
-                    print(len(sentence), len(text))
                     if len(text) == len(sentence): 
                         found = True
-                        print('found it')
                         break
                 if found: 
                     break
             if found: 
                 break
 
-        print(sentence_indices, sentence_words)    
         # sentence_indices = find_consecutive_indices(generated_words, sentence_words)
         word_indices = defaultdict(list)
         word_set = set(matched_words)
