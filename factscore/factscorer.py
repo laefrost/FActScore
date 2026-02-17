@@ -377,6 +377,7 @@ class FactScorer(object):
         
         found = False
         print("Sentence ", sentence, generated_words)
+        print("tokens ", word_tokens)
         for e, element in enumerate(generated_words): 
             print(e, element)
             for i in range(e+1 , len(generated_words)+1): 
