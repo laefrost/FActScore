@@ -224,11 +224,11 @@ class FactScorer(object):
             true_answers = [None] * len(generations)
         
         
-        for topic, generation, facts, sentences, true_answer, question, gen_word in zip(topics, generations, atomic_facts, corresponding_sentences, true_answers, questions, gen_words):
+        for topic, generation, facts, sentences, true_answer, question, gen_word, wt in zip(topics, generations, atomic_facts, corresponding_sentences, true_answers, questions, gen_words, word_tokens):
             if facts is None:
                 decisions.append(None)
             else:
-                decision = self._get_score(topic, generation, facts, sentences, knowledge_source, question=question, do_matching=do_matching, gen_words=gen_word, word_tokens = word_tokens, tokenizer_name = tokenizer_name)
+                decision = self._get_score(topic, generation, facts, sentences, knowledge_source, question=question, do_matching=do_matching, gen_words=gen_word, word_tokens = wt, tokenizer_name = tokenizer_name)
                 score = np.mean([d["is_supported"] for d in decision])
                 sents = [d["sentence"] for d in decision]                
                 # if gamma:
