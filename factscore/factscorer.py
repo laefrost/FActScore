@@ -228,7 +228,7 @@ class FactScorer(object):
             if facts is None:
                 decisions.append(None)
             else:
-                decision = self._get_score(topic, generation, facts, sentences, knowledge_source, true_answer=true_answer, question=question, do_matching=do_matching, gen_words=gen_word, word_tokens = word_tokens, tokenizer_name = tokenizer_name)
+                decision = self._get_score(topic, generation, facts, sentences, knowledge_source, question=question, do_matching=do_matching, gen_words=gen_word, word_tokens = word_tokens, tokenizer_name = tokenizer_name)
                 score = np.mean([d["is_supported"] for d in decision])
                 sents = [d["sentence"] for d in decision]                
                 # if gamma:
