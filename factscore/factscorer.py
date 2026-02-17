@@ -17,6 +17,7 @@ from factscore.npm import NPM
 from factscore.openai_lm import OpenAIModel
 from factscore.retrieval import DocDB, Retrieval
 import re
+from transformers import AutoTokenizer
 
 
 class FactScorer(object):
@@ -128,8 +129,9 @@ class FactScorer(object):
                   knowledge_source=None,
                   verbose=False, 
                   do_matching = False, 
-                  gen_tokens = None, 
-                  gen_words = None):
+                  gen_words = None, 
+                  word_tokens = None, 
+                  tokenizer_name = None):
         
         if knowledge_source is None:
             # use the default knowledge source
@@ -226,7 +228,7 @@ class FactScorer(object):
             if facts is None:
                 decisions.append(None)
             else:
-                decision = self._get_score(topic, generation, facts, sentences, knowledge_source, true_answer=true_answer, question=question, do_matching=do_matching, gen_words=gen_word)
+                decision = self._get_score(topic, generation, facts, sentences, knowledge_source, true_answer=true_answer, question=question, do_matching=do_matching, gen_words=gen_word, word_tokens = word_tokens, tokenizer_name = tokenizer_name)
                 score = np.mean([d["is_supported"] for d in decision])
                 sents = [d["sentence"] for d in decision]                
                 # if gamma:
@@ -256,7 +258,7 @@ class FactScorer(object):
         
         return out
 
-    def _get_score(self, topic, generation, atomic_facts, sentences, knowledge_source = None, cost_estimate=None, do_matching = False, true_answer = None, question = None, gen_tokens = None, gen_words = None):
+    def _get_score(self, topic, generation, atomic_facts, sentences, knowledge_source = None, cost_estimate=None, do_matching = False, question = None, gen_words = None, word_tokens = None, tokenizer_name = None):
         decisions = []
         total_words = 0
         print('length in _get_score',len(atomic_facts), len(sentences))
@@ -350,7 +352,7 @@ class FactScorer(object):
                 match_data = json.loads(output)
                 logging.info(match_data)
                 match_words = match_data["matches"]
-                matched_word_indices = self._match_string(generation, sent, match_words)
+                matched_word_indices = self._match_string(sent, match_words, gen_words, word_tokens, tokenizer_name)
             else: 
                 match_words = gen_words
                 matched_word_indices = list(range(len(gen_words)))
@@ -366,31 +368,45 @@ class FactScorer(object):
         else:
             return decisions
         
-    def _match_string(self, generation, sentence, matched_words): 
+    def _match_string(self, sentence, matched_words, generated_words, word_tokens, tokenizer_name): 
         import itertools
         from collections import defaultdict
         import re
+        
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        
 
-        def find_consecutive_indices(haystack, needle):
-            n = len(needle)
-            for i in range(len(haystack) - n + 1):
-                if haystack[i:i+n] == needle:
-                    return list(range(i, i+n))
-            return None
-        
-        # get generated words
-        pattern = r"\(|\)|[0-9]+(?:[.,-][0-9]+)*|[A-Za-zÀ-ÖØ-öø-ÿ]+(?:[-'][A-Za-zÀ-ÖØ-öø-ÿ]+)*|[.,;?!:]|\n|</s>|'|\"|`|´|-"
-        generation_words = re.findall(pattern, generation)
-        sentence_words = re.findall(pattern, sentence)
-        
-        sentence_indices = find_consecutive_indices(generation_words, sentence_words)
+        found = False
+        for e, element in enumerate(generated_words): 
+            for i in range(e+1 , len(generated_words)+1): 
+                ids_tokens = list(itertools.chain.from_iterable(word_tokens[e:i]))
+                # text = ' '.join(generated_words[e:i])
+                text_tokens = tokenizer.convert_ids_to_tokens(ids_tokens, skip_special_tokens=False)
+                text = tokenizer.convert_tokens_to_string(text_tokens)
+                
+                #print(text, "|", sentence)
+                #print(len(text), len(sentence))
+                #print(ids_tokens)
+                if text in sentence: 
+                    sentence_indices = list(range(e, i))
+                    sentence_words = generated_words[e:i]
+                    if len(text) == len(sentence): 
+                        found = True
+                        print('found it')
+                        break
+                if found: 
+                    break
+            if found: 
+                break
+
+            
+        # sentence_indices = find_consecutive_indices(generated_words, sentence_words)
         word_indices = defaultdict(list)
         word_set = set(matched_words)
-        
         for word, index in zip(sentence_words, sentence_indices):
             if word in word_set:
                 word_indices[word].append(index)
-        
+
         word_indices = dict(word_indices)
         word_indices_list = word_indices.values()
         
@@ -404,7 +420,7 @@ class FactScorer(object):
                 continue
             if sum(diff) < last_diff: 
                 last_diff = sum(diff)
-                final_indices = element   
+                final_indices = element 
         
         return final_indices   
         
