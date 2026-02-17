@@ -375,7 +375,6 @@ class FactScorer(object):
         
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         
-
         found = False
         for e, element in enumerate(generated_words): 
             for i in range(e+1 , len(generated_words)+1): 
@@ -399,7 +398,7 @@ class FactScorer(object):
             if found: 
                 break
 
-            
+        print(sentence_indices, sentence_words)    
         # sentence_indices = find_consecutive_indices(generated_words, sentence_words)
         word_indices = defaultdict(list)
         word_set = set(matched_words)
