@@ -363,7 +363,7 @@ class FactScorer(object):
                               "sentence" : sent, 
                               "matched_words" : match_words, 
                               "matched_word_indices" : matched_word_indices, 
-                              "token_indices" : token_indices})
+                              "matched_token_indices" : token_indices})
 
         if cost_estimate:
             return total_words
