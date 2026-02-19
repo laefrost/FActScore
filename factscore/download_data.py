@@ -136,7 +136,8 @@ if __name__ == '__main__':
 
     download_file("1sbW6pkYl6cc9gooD4WLaeoFKcAj3poZu", "demos.zip", args.data_dir)
     download_file("155exEdKs7R21gZF4G-x54-XN3qswBcPo", "data.zip", args.data_dir)
-    download_file("1Qu4JHWjpUKhGPaAW5UHhS5RJ545CVy4I", "enwiki-20230401.db", args.data_dir)
+    #download_file("1Qu4JHWjpUKhGPaAW5UHhS5RJ545CVy4I", "enwiki-20230401.db", args.data_dir)
+    download_file("https://drive.usercontent.google.com/download?id=1Qu4JHWjpUKhGPaAW5UHhS5RJ545CVy4I&export=download&confirm=t", "enwiki-20230401.db", args.data_dir)
 
     if args.llama_7B_HF_path:
         recover_instruct_llama(args.llama_7B_HF_path, os.path.join(args.model_dir, "inst-llama-7B"))
