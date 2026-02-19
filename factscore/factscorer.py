@@ -18,6 +18,9 @@ from factscore.openai_lm import OpenAIModel
 from factscore.retrieval import DocDB, Retrieval
 import re
 from transformers import AutoTokenizer
+import itertools
+from collections import defaultdict
+import re
 
 
 class FactScorer(object):
@@ -353,6 +356,7 @@ class FactScorer(object):
                 logging.info(match_data)
                 match_words = match_data["matches"]
                 matched_word_indices, token_indices = self._match_string(sent, match_words, gen_words, word_tokens, tokenizer_name)
+                token_indices = list(itertools.chain(*token_indices))
             else: 
                 match_words = gen_words
                 matched_word_indices = list(range(len(gen_words)))
@@ -371,9 +375,6 @@ class FactScorer(object):
             return decisions
         
     def _match_string(self, sentence, matched_words, generated_words, word_tokens, tokenizer_name): 
-        import itertools
-        from collections import defaultdict
-        import re
         
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         
