@@ -352,16 +352,18 @@ class FactScorer(object):
                 match_data = json.loads(output)
                 logging.info(match_data)
                 match_words = match_data["matches"]
-                matched_word_indices = self._match_string(sent, match_words, gen_words, word_tokens, tokenizer_name)
+                matched_word_indices, token_indices = self._match_string(sent, match_words, gen_words, word_tokens, tokenizer_name)
             else: 
                 match_words = gen_words
                 matched_word_indices = list(range(len(gen_words)))
+                token_indices = None
             
             decisions.append({"atom": atom, 
                               "is_supported": is_supported, 
                               "sentence" : sent, 
                               "matched_words" : match_words, 
-                              "matched_word_indices" : matched_word_indices})
+                              "matched_word_indices" : matched_word_indices, 
+                              "token_indices" : token_indices})
 
         if cost_estimate:
             return total_words
@@ -384,6 +386,7 @@ class FactScorer(object):
                 if text in sentence: 
                     sentence_indices = list(range(e, i))
                     sentence_words = generated_words[e:i]
+                    sentence_ids = word_tokens[e:i]
                     if len(text) == len(sentence): 
                         found = True
                         break
@@ -391,30 +394,53 @@ class FactScorer(object):
                     break
             if found: 
                 break
+            
+        def index_nested(lst):
+            counter = 0
 
-        # sentence_indices = find_consecutive_indices(generated_words, sentence_words)
+            def walk(x):
+                nonlocal counter
+
+                if isinstance(x, list):
+                    return [walk(i) for i in x]
+
+                idx = counter
+                counter += 1
+                return idx
+
+            return walk(lst)
+        
+        token_sentence_pos = index_nested(sentence_ids)
+
         word_indices = defaultdict(list)
+        token_indices = defaultdict(list)
         word_set = set(matched_words)
-        for word, index in zip(sentence_words, sentence_indices):
+        for word, index, token_idx in zip(sentence_words, sentence_indices, token_sentence_pos):
             if word in word_set:
                 word_indices[word].append(index)
+                token_indices[word].append(token_idx)
 
         word_indices = dict(word_indices)
         word_indices_list = word_indices.values()
         
+        token_indices = dict(token_indices)
+        token_indices_list = token_indices.values()
+        
         cart_prod = itertools.product(*word_indices_list)
+        cart_prod_tokens = itertools.product(*token_indices_list)
         last_diff = float('inf')
         final_indices = None
-        for element in cart_prod:
-            #if element.sort() == element: 
+        final_token_indices = None
+        for element, tokens in zip(cart_prod, cart_prod_tokens):
             diff = np.diff(element)
             if any(n < 0 for n in diff):
                 continue
             if sum(diff) < last_diff: 
                 last_diff = sum(diff)
                 final_indices = element 
+                final_token_indices = tokens
         
-        return final_indices   
+        return final_indices, final_token_indices   
         
 if __name__ == '__main__':
 
