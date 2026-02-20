@@ -301,6 +301,19 @@ def detect_initials(text):
     match = re.findall(pattern, text)
     return [m for m in match]
 
+
+
+def smart_concat(prev: str, nxt: str) -> str:
+    _NO_SPACE_BEFORE = re.compile(r"^(</[^>]+>|[)\]\}\'\"\.,!?;:])")
+    
+    # If nxt begins with a token that binds to the left, don't insert a space.
+    if _NO_SPACE_BEFORE.match(nxt):
+        return prev + nxt
+    # Otherwise insert a normal space (and avoid double spaces).
+    if prev.endswith(" ") or nxt.startswith(" "):
+        return prev + nxt
+    return prev + " " + nxt
+
 def fix_sentence_splitter(curr_sentences, initials):
     for initial in initials:
         if not np.any([initial in sent for sent in curr_sentences]):
@@ -319,15 +332,18 @@ def fix_sentence_splitter(curr_sentences, initials):
             sentences.append(sent)
         elif len(sent.split())<=1:
             assert sent_idx > 0
-            sentences[-1] += " " + sent
+            # sentences[-1] += " " + sent
+            sentences[-1] = smart_concat(sentences[-1], sent)
             combined_with_previous = False
         elif sent[0].isalpha() and not sent[0].isupper() and sent_idx > 0:
             assert sent_idx > 0, curr_sentences
-            sentences[-1] += " " + sent
+            #sentences[-1] += " " + sent
+            sentences[-1] = smart_concat(sentences[-1], sent)
             combine_with_previous = False
         elif combine_with_previous:
             assert sent_idx > 0
-            sentences[-1] += " " + sent
+            #sentences[-1] += " " + sent
+            sentences[-1] = smart_concat(sentences[-1], sent)
             combine_with_previous = False
         else:
             assert not combine_with_previous
