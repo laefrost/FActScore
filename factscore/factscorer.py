@@ -378,30 +378,26 @@ class FactScorer(object):
         
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         
-        found = False
-        for e, element in enumerate(generated_words): 
-            for i in range(e+1 , len(generated_words)+1): 
-                ids_tokens = list(itertools.chain.from_iterable(word_tokens[e:i]))
-                text_tokens = tokenizer.convert_ids_to_tokens(ids_tokens, skip_special_tokens=False)
-                text = tokenizer.convert_tokens_to_string(text_tokens)
-                if text in sentence: 
-                    sentence_indices = list(range(e, i))
-                    sentence_words = generated_words[e:i]
-                    sentence_ids = word_tokens[e:i]
-                    if len(text) == len(sentence): 
-                        found = True
-                        break
-                if found: 
-                    break
-            if found: 
-                break
+        def find_sentence(generated_words, word_tokens, sentence): 
+            print(sentence)
+            for e, element in enumerate(generated_words): 
+                for i in range(e+1 , len(generated_words)+1): 
+                    ids_tokens = list(itertools.chain.from_iterable(word_tokens[e:i]))
+                    text_tokens = tokenizer.convert_ids_to_tokens(ids_tokens, skip_special_tokens=False)
+                    text = tokenizer.convert_tokens_to_string(text_tokens)
+                    #print(text, len(text), len(sentence), text in sentence)
+                    if text in sentence: 
+                        sentence_indices = list(range(e, i))
+                        sentence_words = generated_words[e:i]
+                        sentence_ids = word_tokens[e:i]
+                        if len(text) == len(sentence): 
+                            return sentence_indices, sentence_words, sentence_ids
             
         def index_nested(lst):
             counter = 0
 
             def walk(x):
                 nonlocal counter
-
                 if isinstance(x, list):
                     return [walk(i) for i in x]
 
@@ -410,23 +406,27 @@ class FactScorer(object):
                 return idx
 
             return walk(lst)
+
         
+        sentence_indices, sentence_words, sentence_ids = find_sentence(generated_words, word_tokens, sentence)
         token_sentence_pos = index_nested(sentence_ids)
 
         word_indices = defaultdict(list)
         token_indices = defaultdict(list)
         word_set = set(matched_words)
         for word, index, token_idx in zip(sentence_words, sentence_indices, token_sentence_pos):
-            if word in word_set:
-                word_indices[word].append(index)
-                token_indices[word].append(token_idx)
+            for element in word_set: 
+                if word in element:
+                    word_indices[word].append(index)
+                    token_indices[word].append(token_idx)
 
         word_indices = dict(word_indices)
         word_indices_list = word_indices.values()
-        
+
         token_indices = dict(token_indices)
         token_indices_list = token_indices.values()
         
+
         cart_prod = itertools.product(*word_indices_list)
         cart_prod_tokens = itertools.product(*token_indices_list)
         last_diff = float('inf')
