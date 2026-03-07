@@ -467,6 +467,7 @@ class FactScorer(object):
         print("token positions: ", token_positions)
                 
         def find_sentence(generated_words, word_tokens, sentence): 
+            sentence_indices, sentence_words, sentence_ids = None, None, None
             for e, element in enumerate(generated_words): 
                 for i in range(e+1 , len(generated_words)+1): 
                     ids_tokens = list(itertools.chain.from_iterable(word_tokens[e:i]))
@@ -479,6 +480,9 @@ class FactScorer(object):
                         sentence_ids = token_positions[e:i]
                         if len(text) == len(sentence): 
                             return sentence_indices, sentence_words, sentence_ids
+            return sentence_indices, sentence_words, sentence_ids
+                    
+                    
             
         # def index_nested(sentence_indices, sentence_ids):
         #     token_indices = list()
@@ -492,6 +496,10 @@ class FactScorer(object):
 
         
         sentence_indices, sentence_words, token_sentence_pos = find_sentence(generated_words, word_tokens, sentence)
+        
+        if sentence_indices is None: 
+            return list(range(len(generated_words))), None
+        
         word_indices = defaultdict(list)
         token_indices = defaultdict(list)
         # word_set = set(matched_words)
