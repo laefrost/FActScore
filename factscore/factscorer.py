@@ -378,9 +378,95 @@ class FactScorer(object):
         
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         
+        print("sentence", sentence)
+        print("matched_words", matched_words)
+        
+        # def find_sentence(generated_words, word_tokens, sentence): 
+        #     print(sentence)
+        #     sentence_indices, sentence_words, sentence_ids = None, None, None
+        #     for e, element in enumerate(generated_words): 
+        #         for i in range(e+1 , len(generated_words)+1): 
+        #             ids_tokens = list(itertools.chain.from_iterable(word_tokens[e:i]))
+        #             text_tokens = tokenizer.convert_ids_to_tokens(ids_tokens, skip_special_tokens=False)
+        #             text = tokenizer.convert_tokens_to_string(text_tokens)
+        #             #print(text, len(text), len(sentence), text in sentence)
+        #             if text in sentence: 
+        #                 sentence_indices = list(range(e, i))
+        #                 sentence_words = generated_words[e:i]
+        #                 sentence_ids = word_tokens[e:i]
+        #                 if len(text) == len(sentence): 
+        #                     return sentence_indices, sentence_words, sentence_ids
+        #         return sentence_indices, sentence_words, sentence_ids
+            
+        # def index_nested(lst):
+        #     counter = 0
+
+        #     def walk(x):
+        #         nonlocal counter
+        #         if isinstance(x, list):
+        #             return [walk(i) for i in x]
+
+        #         idx = counter
+        #         counter += 1
+        #         return idx
+
+        #     return walk(lst)
+
+        
+        # sentence_indices, sentence_words, sentence_ids = find_sentence(generated_words, word_tokens, sentence)
+        
+        # if sentence_indices is None: 
+        #     return list(range(len(generated_words))), list(range(len(word_tokens)))
+        
+        # token_sentence_pos = index_nested(sentence_ids)
+
+        # word_indices = defaultdict(list)
+        # token_indices = defaultdict(list)
+        # word_set = set(matched_words)
+        # for word, index, token_idx in zip(sentence_words, sentence_indices, token_sentence_pos):
+        #     for element in word_set: 
+        #         if word in element:
+        #             word_indices[word].append(index)
+        #             token_indices[word].append(token_idx)
+
+        # word_indices = dict(word_indices)
+        # word_indices_list = word_indices.values()
+
+        # token_indices = dict(token_indices)
+        # token_indices_list = token_indices.values()
+        
+
+        # cart_prod = itertools.product(*word_indices_list)
+        # cart_prod_tokens = itertools.product(*token_indices_list)
+        # last_diff = float('inf')
+        # final_indices = None
+        # final_token_indices = None
+        # for element, tokens in zip(cart_prod, cart_prod_tokens):
+        #     diff = np.diff(element)
+        #     if any(n < 0 for n in diff):
+        #         continue
+        #     if sum(diff) < last_diff: 
+        #         last_diff = sum(diff)
+        #         final_indices = element 
+        #         final_token_indices = tokens
+        
+        # -----------------------------------------------
+        def expl(lst):
+            counter = 0
+            def walk(x):
+                nonlocal counter
+                if isinstance(x, list):
+                    return [walk(i) for i in x]
+
+                idx = counter
+                counter += 1
+                return idx
+            return walk(lst)
+        
+        token_positions = expl(word_tokens)
+        print("token positions: ", token_positions)
+                
         def find_sentence(generated_words, word_tokens, sentence): 
-            print(sentence)
-            sentence_indices, sentence_words, sentence_ids = None, None, None
             for e, element in enumerate(generated_words): 
                 for i in range(e+1 , len(generated_words)+1): 
                     ids_tokens = list(itertools.chain.from_iterable(word_tokens[e:i]))
@@ -390,39 +476,41 @@ class FactScorer(object):
                     if text in sentence: 
                         sentence_indices = list(range(e, i))
                         sentence_words = generated_words[e:i]
-                        sentence_ids = word_tokens[e:i]
+                        sentence_ids = token_positions[e:i]
                         if len(text) == len(sentence): 
                             return sentence_indices, sentence_words, sentence_ids
-                return sentence_indices, sentence_words, sentence_ids
             
-        def index_nested(lst):
-            counter = 0
-
-            def walk(x):
-                nonlocal counter
-                if isinstance(x, list):
-                    return [walk(i) for i in x]
-
-                idx = counter
-                counter += 1
-                return idx
-
-            return walk(lst)
+        # def index_nested(sentence_indices, sentence_ids):
+        #     token_indices = list()
+        #     start_idx = sentence_indices[0]
+        #     for s, sentence_pos in enumerate(sentence_indices):
+        #         indices = list(range(start_idx, start_idx+len(sentence_ids[s])))
+        #         token_indices.append(indices)
+        #         start_idx = start_idx+len(sentence_ids[s])
+                
+        #     return token_indices
 
         
-        sentence_indices, sentence_words, sentence_ids = find_sentence(generated_words, word_tokens, sentence)
-        
-        if sentence_indices is None: 
-            return list(range(len(generated_words))), list(range(len(word_tokens)))
-        
-        token_sentence_pos = index_nested(sentence_ids)
-
+        sentence_indices, sentence_words, token_sentence_pos = find_sentence(generated_words, word_tokens, sentence)
         word_indices = defaultdict(list)
         token_indices = defaultdict(list)
-        word_set = set(matched_words)
+        # word_set = set(matched_words)
+        print(generated_words)
+        print("word set", matched_words)
+        def normalize(s):
+            # Only strip trailing punctuation if string contains normal chars
+            # and contains punctuation/special chars
+            has_normal_chars = bool(re.search(r'[a-zA-Z0-9]', s))
+            has_special_chars = bool(re.search(r'[^\w\s]', s))
+            
+            if not has_normal_chars or not has_special_chars:
+                return s
+            return re.sub(r'[^\w\s]+$', '', s).strip()
+        
         for word, index, token_idx in zip(sentence_words, sentence_indices, token_sentence_pos):
-            for element in word_set: 
-                if word in element:
+            for element in matched_words: 
+                if word == element or normalize(word) == normalize(element):
+                    print(word , element)
                     word_indices[word].append(index)
                     token_indices[word].append(token_idx)
 
@@ -432,8 +520,11 @@ class FactScorer(object):
         token_indices = dict(token_indices)
         token_indices_list = token_indices.values()
         
+        print("sentence words", sentence_words)
+        print("word indices list: ", word_indices_list)
 
         cart_prod = itertools.product(*word_indices_list)
+        
         cart_prod_tokens = itertools.product(*token_indices_list)
         last_diff = float('inf')
         final_indices = None
@@ -446,6 +537,10 @@ class FactScorer(object):
                 last_diff = sum(diff)
                 final_indices = element 
                 final_token_indices = tokens
+        # print(fact['fact'])
+        print('final_indices',final_indices)
+        print('final_token_indices',final_token_indices)
+        print("-------------------------------------")
         
         return final_indices, final_token_indices   
         
