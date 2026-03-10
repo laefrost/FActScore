@@ -516,6 +516,7 @@ class FactScorer(object):
             return re.sub(r'[^\w\s]+$', '', s).strip()
         
         for word, index, token_idx in zip(sentence_words, sentence_indices, token_sentence_pos):
+            word = word.strip()
             for element in matched_words: 
                 if word == element or normalize(word) == normalize(element):
                     print(word , element)
