@@ -588,7 +588,7 @@ class FactScorer(object):
         token_indices_list = token_indices.values()
         token_indices_list = [sorted(x) for x in token_indices_list]
         
-        final_indices, final_token_indices = self.find_best_sequence(word_indices_list, token_indices_list)
+        final_indices, final_token_indices = self._find_best_sequence(word_indices_list, token_indices_list)
         
         if final_indices is None: 
             final_indices = []
