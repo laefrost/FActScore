@@ -21,6 +21,8 @@ from transformers import AutoTokenizer
 import itertools
 from collections import defaultdict
 import re
+import heapq
+
 
 
 class FactScorer(object):
@@ -376,7 +378,7 @@ class FactScorer(object):
         
     def _match_string(self, sentence, matched_words, generated_words, word_tokens, tokenizer_name): 
         
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        #tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         
         print("sentence", sentence)
         print("matched_words", matched_words)
@@ -451,6 +453,106 @@ class FactScorer(object):
         #         final_token_indices = tokens
         
         # -----------------------------------------------
+        # def expl(lst):
+        #     counter = 0
+        #     def walk(x):
+        #         nonlocal counter
+        #         if isinstance(x, list):
+        #             return [walk(i) for i in x]
+
+        #         idx = counter
+        #         counter += 1
+        #         return idx
+        #     return walk(lst)
+        
+        # token_positions = expl(word_tokens)
+        # print("token positions: ", token_positions)
+                
+        # def find_sentence(generated_words, word_tokens, sentence): 
+        #     sentence_indices, sentence_words, sentence_ids = None, None, None
+        #     for e, element in enumerate(generated_words): 
+        #         for i in range(e+1 , len(generated_words)+1): 
+        #             ids_tokens = list(itertools.chain.from_iterable(word_tokens[e:i]))
+        #             text_tokens = tokenizer.convert_ids_to_tokens(ids_tokens, skip_special_tokens=False)
+        #             text = tokenizer.convert_tokens_to_string(text_tokens)
+        #             #print(text, len(text), len(sentence), text in sentence)
+        #             if text in sentence: 
+        #                 sentence_indices = list(range(e, i))
+        #                 sentence_words = generated_words[e:i]
+        #                 sentence_ids = token_positions[e:i]
+        #                 if len(text) == len(sentence): 
+        #                     return sentence_indices, sentence_words, sentence_ids
+        #     return sentence_indices, sentence_words, sentence_ids
+                    
+                    
+            
+        # # def index_nested(sentence_indices, sentence_ids):
+        # #     token_indices = list()
+        # #     start_idx = sentence_indices[0]
+        # #     for s, sentence_pos in enumerate(sentence_indices):
+        # #         indices = list(range(start_idx, start_idx+len(sentence_ids[s])))
+        # #         token_indices.append(indices)
+        # #         start_idx = start_idx+len(sentence_ids[s])
+                
+        # #     return token_indices
+
+        
+        # sentence_indices, sentence_words, token_sentence_pos = find_sentence(generated_words, word_tokens, sentence)
+        
+        # if sentence_indices is None: 
+        #     return list(range(len(generated_words))), None
+        
+        # word_indices = defaultdict(list)
+        # token_indices = defaultdict(list)
+        # # word_set = set(matched_words)
+        # print(generated_words)
+        # print("word set", matched_words)
+        # def normalize(s):
+        #     # Only strip trailing punctuation if string contains normal chars
+        #     # and contains punctuation/special chars
+        #     has_normal_chars = bool(re.search(r'[a-zA-Z0-9]', s))
+        #     has_special_chars = bool(re.search(r'[^\w\s]', s))
+            
+        #     if not has_normal_chars or not has_special_chars:
+        #         return s
+        #     return re.sub(r'[^\w\s]+$', '', s).strip()
+        
+        # for word, index, token_idx in zip(sentence_words, sentence_indices, token_sentence_pos):
+        #     word = word.strip()
+        #     for element in matched_words: 
+        #         if word == element or normalize(word) == normalize(element):
+        #             print(word , element)
+        #             word_indices[word].append(index)
+        #             token_indices[word].append(token_idx)
+
+        # word_indices = dict(word_indices)
+        # word_indices_list = word_indices.values()
+
+        # token_indices = dict(token_indices)
+        # token_indices_list = token_indices.values()
+        
+        # print("sentence words", sentence_words)
+        # print("word indices list: ", word_indices_list)
+
+        # cart_prod = itertools.product(*word_indices_list)
+        
+        # cart_prod_tokens = itertools.product(*token_indices_list)
+        # last_diff = float('inf')
+        # final_indices = None
+        # final_token_indices = None
+        # for element, tokens in zip(cart_prod, cart_prod_tokens):
+        #     diff = np.diff(element)
+        #     if any(n < 0 for n in diff):
+        #         continue
+        #     if sum(diff) < last_diff: 
+        #         last_diff = sum(diff)
+        #         final_indices = element 
+        #         final_token_indices = tokens
+        # # print(fact['fact'])
+        # print('final_indices',final_indices)
+        # print('final_token_indices',final_token_indices)
+        # print("-------------------------------------")
+        
         def expl(lst):
             counter = 0
             def walk(x):
@@ -464,94 +566,80 @@ class FactScorer(object):
             return walk(lst)
         
         token_positions = expl(word_tokens)
-        print("token positions: ", token_positions)
-                
-        def find_sentence(generated_words, word_tokens, sentence): 
-            sentence_indices, sentence_words, sentence_ids = None, None, None
-            for e, element in enumerate(generated_words): 
-                for i in range(e+1 , len(generated_words)+1): 
-                    ids_tokens = list(itertools.chain.from_iterable(word_tokens[e:i]))
-                    text_tokens = tokenizer.convert_ids_to_tokens(ids_tokens, skip_special_tokens=False)
-                    text = tokenizer.convert_tokens_to_string(text_tokens)
-                    #print(text, len(text), len(sentence), text in sentence)
-                    if text in sentence: 
-                        sentence_indices = list(range(e, i))
-                        sentence_words = generated_words[e:i]
-                        sentence_ids = token_positions[e:i]
-                        if len(text) == len(sentence): 
-                            return sentence_indices, sentence_words, sentence_ids
-            return sentence_indices, sentence_words, sentence_ids
-                    
-                    
-            
-        # def index_nested(sentence_indices, sentence_ids):
-        #     token_indices = list()
-        #     start_idx = sentence_indices[0]
-        #     for s, sentence_pos in enumerate(sentence_indices):
-        #         indices = list(range(start_idx, start_idx+len(sentence_ids[s])))
-        #         token_indices.append(indices)
-        #         start_idx = start_idx+len(sentence_ids[s])
-                
-        #     return token_indices
+        
+        word_to_indices = defaultdict(list)
+        token_to_indices = defaultdict(list)
+        def normalize(word):
+            return re.sub(r"^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$", "", word.strip().lower())
 
-        
-        sentence_indices, sentence_words, token_sentence_pos = find_sentence(generated_words, word_tokens, sentence)
-        
-        if sentence_indices is None: 
-            return list(range(len(generated_words))), None
-        
-        word_indices = defaultdict(list)
-        token_indices = defaultdict(list)
-        # word_set = set(matched_words)
-        print(generated_words)
-        print("word set", matched_words)
-        def normalize(s):
-            # Only strip trailing punctuation if string contains normal chars
-            # and contains punctuation/special chars
-            has_normal_chars = bool(re.search(r'[a-zA-Z0-9]', s))
-            has_special_chars = bool(re.search(r'[^\w\s]', s))
-            
-            if not has_normal_chars or not has_special_chars:
-                return s
-            return re.sub(r'[^\w\s]+$', '', s).strip()
-        
-        for word, index, token_idx in zip(sentence_words, sentence_indices, token_sentence_pos):
-            word = word.strip()
-            for element in matched_words: 
-                if word == element or normalize(word) == normalize(element):
-                    print(word , element)
-                    word_indices[word].append(index)
-                    token_indices[word].append(token_idx)
+        for i, w in enumerate(generated_words):
+            word_to_indices[normalize(w)].append(i)
+            token_to_indices[normalize(w)].append(token_positions[i])
 
+        word_indices = {w: word_to_indices[normalize(w)] for w in matched_words}
+        token_indices = {w: token_to_indices[normalize(w)] for w in matched_words}
+        
+          
         word_indices = dict(word_indices)
         word_indices_list = word_indices.values()
+        word_indices_list = [sorted(x) for x in word_indices_list]
 
         token_indices = dict(token_indices)
         token_indices_list = token_indices.values()
+        token_indices_list = [sorted(x) for x in token_indices_list]
         
-        print("sentence words", sentence_words)
-        print("word indices list: ", word_indices_list)
+        final_indices, final_token_indices = self.find_best_sequence(word_indices_list, token_indices_list)
+        
+        if final_indices is None: 
+            final_indices = []
+            final_token_indices = []
+        
+        return final_indices, final_token_indices  
+    
+    def _find_best_sequence(self, word_indices_list, token_indices_list):
+        try: 
+            if not word_indices_list:
+                return None, None
+            
+            min_possible_diff = len(word_indices_list) - 1
+            
+            heap = [(0, idx, 0, [idx], [tok]) 
+                    for idx, tok in zip(word_indices_list[0], token_indices_list[0])]
+            heapq.heapify(heap)
+            
+            best_cost = float('inf')
+            best_indices = None
+            best_tokens = None
+            
+            while heap:
+                cost, last_idx, depth, path, path_tok = heapq.heappop(heap)
+                
+                if cost >= best_cost:
+                    continue
 
-        cart_prod = itertools.product(*word_indices_list)
-        
-        cart_prod_tokens = itertools.product(*token_indices_list)
-        last_diff = float('inf')
-        final_indices = None
-        final_token_indices = None
-        for element, tokens in zip(cart_prod, cart_prod_tokens):
-            diff = np.diff(element)
-            if any(n < 0 for n in diff):
-                continue
-            if sum(diff) < last_diff: 
-                last_diff = sum(diff)
-                final_indices = element 
-                final_token_indices = tokens
-        # print(fact['fact'])
-        print('final_indices',final_indices)
-        print('final_token_indices',final_token_indices)
-        print("-------------------------------------")
-        
-        return final_indices, final_token_indices   
+                if depth == len(word_indices_list) - 1:
+                    if cost < best_cost:
+                        best_cost = cost
+                        best_indices = path
+                        best_tokens = path_tok
+                    if best_cost == min_possible_diff:
+                        break
+                    continue
+                
+                next_word_indices = word_indices_list[depth + 1]
+                next_word_tokens = token_indices_list[depth + 1]
+                
+                for next_idx, next_tok in zip(next_word_indices, next_word_tokens):
+                    new_cost = cost + abs(next_idx - last_idx)  # absolute difference
+                    if new_cost < best_cost:
+                        heapq.heappush(heap, (new_cost, next_idx, depth + 1,
+                                            path + [next_idx], path_tok + [next_tok]))
+            
+            return (tuple(best_indices) if best_indices else None,
+                    tuple(best_tokens) if best_tokens else None) 
+        except Exception as e: 
+            print("Exception", e)
+            return (None, None)
         
 if __name__ == '__main__':
 
