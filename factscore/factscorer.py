@@ -22,7 +22,9 @@ import itertools
 from collections import defaultdict
 import re
 import heapq
-
+import nltk
+nltk.download("punkt_tab")  # one-time download
+from nltk.tokenize import word_tokenize
 
 
 class FactScorer(object):
@@ -325,38 +327,44 @@ class FactScorer(object):
             if do_matching: 
                 # class MathReasoning(BaseModel):
                 #     steps: list[str]
-                format_config = {
-                    "name" : "matching_response",
-                    "type": "json_schema",
-                    "schema": {
-                            "type": "object",
-                            "properties": {
-                                "matches": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "string"
-                                    }
-                                }
-                            },
-                            "required": ["matches"],
-                            "additionalProperties": False
-                    }
-                }
+                # format_config = {
+                #     "name" : "matching_response",
+                #     "type": "json_schema",
+                #     "schema": {
+                #             "type": "object",
+                #             "properties": {
+                #                 "matches": {
+                #                     "type": "array",
+                #                     "items": {
+                #                         "type": "string"
+                #                     }
+                #                 }
+                #             },
+                #             "required": ["matches"],
+                #             "additionalProperties": False
+                #     }
+                # }
                 
-                matching_prompt = f"""Given the fact, identify the corresponding words "
-                    "in the original sentence that help derive this fact."
-                    "Please list all words within the original sentence that are related to the fact, "
-                    "in the order they appear in the original sentence, "
-                    "each word separated by comma."
-                    "\nFact: {atom}\n"
-                    "Sentence: {sent}\n"
-                    "Words within the sentence: {gen_words}"
-                    Words within sentence that helps to derive the fact, in the original order, separated by comma: """
+                # matching_prompt = f"""Given the fact, identify the corresponding words "
+                #     "in the original sentence that help derive this fact."
+                #     "Please list all words within the original sentence that are related to the fact, "
+                #     "in the order they appear in the original sentence, "
+                #     "each word separated by comma."
+                #     "\nFact: {atom}\n"
+                #     "Sentence: {sent}\n"
+                #     "Words within the sentence: {gen_words}"
+                #     Words within sentence that helps to derive the fact, in the original order, separated by comma: """
                 
-                output, response = self.lm.generate(prompt=matching_prompt, response_format=format_config)
-                match_data = json.loads(output)
-                logging.info(match_data)
-                match_words = match_data["matches"]
+                # output, response = self.lm.generate(prompt=matching_prompt, response_format=format_config)
+                # match_data = json.loads(output)
+                # logging.info(match_data)
+                # match_words = match_data["matches"]
+
+                set_gen_words = set(word.lower() for word in gen_words)   # set = fast lookups, order untouched
+                match_words = [w for w in word_tokenize(atom.lower()) if w in set_gen_words]
+
+                print("matched words:", match_words)
+
                 matched_word_indices, token_indices = self._match_string(sent, match_words, gen_words, word_tokens, tokenizer_name)
                 token_indices = list(itertools.chain(*token_indices))
             else: 
