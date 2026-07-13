@@ -47,6 +47,18 @@ class OpenAIModel(LM):
             output = response["output_text"]
             return output, response
         
+        elif "gpt-5.6-luna" in self.model_name:
+            response = call_chat_model(
+                client=self.client,
+                prompt=prompt,
+                model_name="gpt-5.6-luna",
+                temp=self.temp,
+                max_output_tokens=max_output_length,
+                response_format=response_format
+            )
+            output = response["output_text"]
+            return output, response
+        
         elif "gpt-5-mini" in self.model_name:
             response = call_chat_model(
                 client=self.client,

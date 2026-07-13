@@ -40,8 +40,8 @@ class FactScorer(object):
                  batch_size=256):
         assert model_name in ["retrieval+llama", "retrieval+llama+npm", "retrieval+ChatGPT", "npm", 
                               "retrieval+ChatGPT+npm", "ChatGPT", "gpt-oss", "retrieval+gpt-oss-20b", 
-                              "hf-inf", "retrieval+hf-inf", "gpt-4o-mini", "gpt-5-mini",
-                              "retrieval+gpt-4o-mini", "retrieval+gpt-5-mini"]
+                              "hf-inf", "retrieval+hf-inf", "gpt-4o-mini", "gpt-5-mini", "gpt-5.6-luna",
+                              "retrieval+gpt-4o-mini", "retrieval+gpt-5-mini", "retrieval+gpt-5.6-luna"]
         self.model_name = model_name
 
         self.db = {}
