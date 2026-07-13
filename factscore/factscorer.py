@@ -590,17 +590,8 @@ class FactScorer(object):
             word_to_indices[normalize(w)].append(i)
             token_to_indices[normalize(w)].append(token_positions[i])
 
-        word_indices = {w: word_to_indices[normalize(w)] for w in matched_words}
-        token_indices = {w: token_to_indices[normalize(w)] for w in matched_words}
-        
-          
-        word_indices = dict(word_indices)
-        word_indices_list = word_indices.values()
-        word_indices_list = [sorted(x) for x in word_indices_list]
-
-        token_indices = dict(token_indices)
-        token_indices_list = token_indices.values()
-        token_indices_list = [sorted(x) for x in token_indices_list]
+        word_indices_list = [sorted(word_to_indices[normalize(w)]) for w in matched_words]
+        token_indices_list = [sorted(token_to_indices[normalize(w)]) for w in matched_words]
         
         final_indices, final_token_indices = self._find_best_sequence(word_indices_list, token_indices_list)
         
