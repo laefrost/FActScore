@@ -601,11 +601,15 @@ class FactScorer(object):
         return final_indices, final_token_indices  
     
     def _find_best_sequence(self, word_indices_list, token_indices_list):
-        # Layered shortest-path DP: pick one candidate per position (in order)
-        # minimizing the sum of |consecutive index difference|. Keeping only the
-        # best cost to reach each (depth, candidate) node - instead of enumerating
-        # every path, as a naive search would - keeps this polynomial instead of
-        # exponential in the number of candidates per word.
+        # Layered shortest-path DP: pick one candidate per position (in order),
+        # requiring indices to strictly increase from one position to the next.
+        # This keeps the matched words in their natural left-to-right order in
+        # the sentence, minimizes the total span, and - since no index can equal
+        # an earlier one - guarantees every chosen index is used at most once.
+        # Keeping only the best cost to reach each (depth, candidate) node -
+        # instead of enumerating every path, as a naive search would - keeps
+        # this polynomial instead of exponential in the number of candidates
+        # per word.
         try:
             if not word_indices_list:
                 return None, None
@@ -621,13 +625,18 @@ class FactScorer(object):
 
                 for j, idx in enumerate(cur_indices):
                     for k, prev_idx in enumerate(prev_indices):
-                        cost = costs[k] + abs(idx - prev_idx)
+                        if idx <= prev_idx or costs[k] == float('inf'):
+                            continue
+                        cost = costs[k] + (idx - prev_idx)
                         if cost < cur_costs[j]:
                             cur_costs[j] = cost
                             cur_back[j] = k
 
                 backpointers.append(cur_back)
                 costs = cur_costs
+
+            if all(cost == float('inf') for cost in costs):
+                return None, None
 
             best_j = min(range(len(costs)), key=lambda j: costs[j])
 
