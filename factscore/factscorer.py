@@ -21,7 +21,6 @@ from transformers import AutoTokenizer
 import itertools
 from collections import defaultdict
 import re
-import heapq
 import nltk
 nltk.download("punkt_tab")  # one-time download
 from nltk.tokenize import word_tokenize
@@ -602,47 +601,46 @@ class FactScorer(object):
         return final_indices, final_token_indices  
     
     def _find_best_sequence(self, word_indices_list, token_indices_list):
-        try: 
+        # Layered shortest-path DP: pick one candidate per position (in order)
+        # minimizing the sum of |consecutive index difference|. Keeping only the
+        # best cost to reach each (depth, candidate) node - instead of enumerating
+        # every path, as a naive search would - keeps this polynomial instead of
+        # exponential in the number of candidates per word.
+        try:
             if not word_indices_list:
                 return None, None
-            
-            min_possible_diff = len(word_indices_list) - 1
-            
-            heap = [(0, idx, 0, [idx], [tok]) 
-                    for idx, tok in zip(word_indices_list[0], token_indices_list[0])]
-            heapq.heapify(heap)
-            
-            best_cost = float('inf')
-            best_indices = None
-            best_tokens = None
-            
-            while heap:
-                cost, last_idx, depth, path, path_tok = heapq.heappop(heap)
-                
-                if cost >= best_cost:
-                    continue
 
-                if depth == len(word_indices_list) - 1:
-                    if cost < best_cost:
-                        best_cost = cost
-                        best_indices = path
-                        best_tokens = path_tok
-                    if best_cost == min_possible_diff:
-                        break
-                    continue
-                
-                next_word_indices = word_indices_list[depth + 1]
-                next_word_tokens = token_indices_list[depth + 1]
-                
-                for next_idx, next_tok in zip(next_word_indices, next_word_tokens):
-                    new_cost = cost + abs(next_idx - last_idx)  # absolute difference
-                    if new_cost < best_cost:
-                        heapq.heappush(heap, (new_cost, next_idx, depth + 1,
-                                            path + [next_idx], path_tok + [next_tok]))
-            
-            return (tuple(best_indices) if best_indices else None,
-                    tuple(best_tokens) if best_tokens else None) 
-        except Exception as e: 
+            costs = [0] * len(word_indices_list[0])
+            backpointers = []
+
+            for depth in range(1, len(word_indices_list)):
+                prev_indices = word_indices_list[depth - 1]
+                cur_indices = word_indices_list[depth]
+                cur_costs = [float('inf')] * len(cur_indices)
+                cur_back = [-1] * len(cur_indices)
+
+                for j, idx in enumerate(cur_indices):
+                    for k, prev_idx in enumerate(prev_indices):
+                        cost = costs[k] + abs(idx - prev_idx)
+                        if cost < cur_costs[j]:
+                            cur_costs[j] = cost
+                            cur_back[j] = k
+
+                backpointers.append(cur_back)
+                costs = cur_costs
+
+            best_j = min(range(len(costs)), key=lambda j: costs[j])
+
+            best_indices = [None] * len(word_indices_list)
+            best_tokens = [None] * len(word_indices_list)
+            j = best_j
+            for depth in range(len(word_indices_list) - 1, -1, -1):
+                best_indices[depth] = word_indices_list[depth][j]
+                best_tokens[depth] = token_indices_list[depth][j]
+                j = backpointers[depth - 1][j] if depth > 0 else None
+
+            return tuple(best_indices), tuple(best_tokens)
+        except Exception as e:
             print("Exception", e)
             return (None, None)
         
