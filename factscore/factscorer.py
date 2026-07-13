@@ -273,18 +273,24 @@ class FactScorer(object):
             atom = atom.strip()
             if self.lm:
                 if knowledge_source != None: 
-                    passages = self.retrieval[knowledge_source].get_passages(topic, atom, k=5)
-                    definition = "Answer the question about {} based on the given context.\n\n".format(topic)
-                    context = ""
-                    for psg_idx, psg in enumerate(reversed(passages)):
-                        context += "Title: {}\nText: {}\n\n".format(psg["title"], psg["text"].replace("<s>", "").replace("</s>", ""))
-                    definition += context.strip()
-                    if not definition[-1] in string.punctuation:
-                        definition += "."
-                    prompt = "{}\n\nInput: {} True or False?\nOutput:".format(definition.strip(), atom.strip())
+                    try:
+                        passages = self.retrieval[knowledge_source].get_passages(topic, atom, k=5)
+                        definition = "Answer the question about {} based on the given context.\n\n".format(topic)
+                        context = ""
+                        for psg_idx, psg in enumerate(reversed(passages)):
+                            context += "Title: {}\nText: {}\n\n".format(psg["title"], psg["text"].replace("<s>", "").replace("</s>", ""))
+                        definition += context.strip()
+                        if not definition[-1] in string.punctuation:
+                            definition += "."
+                        prompt = "{}\n\nInput: {} True or False?\nOutput:".format(definition.strip(), atom.strip())
+                    except:
+                        prompt = f"""You are given a generated answer, a derived fact from the generated answer to the question {question}.
+                        \nDetermine if the derived fact is true or false.
+                        \nGenerated answer: {generation}
+                        \nDerived Fact: {atom} True or False?\nOutput:"""
                 else: 
                     prompt = f"""You are given a generated answer, a derived fact from the generated answer to the question {question}.
-                    \nBased on your own knowledge, determine if the derived fact is true or false.
+                    \nDetermine if the derived fact is true or false.
                     \nGenerated answer: {generation}
                     \nDerived Fact: {atom} True or False?\nOutput:"""
                     
