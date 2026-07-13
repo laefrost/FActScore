@@ -367,7 +367,7 @@ class FactScorer(object):
                 # match_words = match_data["matches"]
 
                 set_gen_words = set(word.lower() for word in gen_words)   # set = fast lookups, order untouched
-                match_words = [w for w in word_tokenize(atom.lower()) if w in set_gen_words]
+                match_words = [w for w in word_tokenize(sent.lower()) if w in set_gen_words]
 
                 print("matched words:", match_words)
 
