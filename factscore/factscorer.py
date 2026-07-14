@@ -371,7 +371,6 @@ class FactScorer(object):
                 print("matched words:", match_words)
 
                 matched_word_indices, token_indices = self._match_string(sent, match_words, gen_words, word_tokens, tokenizer_name)
-                token_indices = list(itertools.chain(*token_indices))
             else: 
                 match_words = gen_words
                 matched_word_indices = list(range(len(gen_words)))
@@ -591,14 +590,25 @@ class FactScorer(object):
 
         word_indices_list = [sorted(word_to_indices[normalize(w)]) for w in matched_words]
         token_indices_list = [sorted(token_to_indices[normalize(w)]) for w in matched_words]
-        
-        final_indices, final_token_indices = self._find_best_sequence(word_indices_list, token_indices_list)
-        
-        if final_indices is None: 
-            final_indices = []
-            final_token_indices = []
-        
-        return final_indices, final_token_indices  
+
+        best_indices, best_token_indices = self._find_best_sequence(word_indices_list, token_indices_list)
+
+        if best_indices is None:
+            return {}, {}
+
+        # Key by (word, occurrence#) rather than just the word, since matched_words
+        # can contain the same word more than once - a plain word key would silently
+        # overwrite earlier occurrences.
+        word_occurrence_counts = defaultdict(int)
+        final_indices = {}
+        final_token_indices = {}
+        for w, idx, tok in zip(matched_words, best_indices, best_token_indices):
+            key = (w, word_occurrence_counts[w])
+            word_occurrence_counts[w] += 1
+            final_indices[key] = idx
+            final_token_indices[key] = tok
+
+        return final_indices, final_token_indices
     
     def _find_best_sequence(self, word_indices_list, token_indices_list):
         # Layered shortest-path DP: pick one candidate per position (in order),
