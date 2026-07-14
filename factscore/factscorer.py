@@ -72,6 +72,7 @@ class FactScorer(object):
             self.lm = OpenAIModel(model_name=model_name,
                                   cache_file=os.path.join(cache_dir, "ChatGPT.pkl"),
                                   key_path=openai_key)
+            #self.backup_lm = OpenAIModel(model_name='')
         elif "hf" in model_name: 
             self.lm = HFInf(model_name="hf-inf", model_id="meta-llama/Llama-3.2-3B-Instruct", cache_file=os.path.join(cache_dir, "hf.pkl"))
         else:
@@ -289,7 +290,7 @@ class FactScorer(object):
                         \nDerived Fact: {atom} True or False?\nOutput:"""
                 else: 
                     prompt = f"""You are given a generated answer, a derived fact from the generated answer to the question {question}.
-                    \nDetermine if the derived fact is true or false.
+                    \nDetermine if the derived fact is true or false. If you are unsure, do a websearch to determine the answers.
                     \nGenerated answer: {generation}
                     \nDerived Fact: {atom} True or False?\nOutput:"""
                     
@@ -330,42 +331,8 @@ class FactScorer(object):
                 is_supported = npprob > 0.3
                 
             if do_matching: 
-                # class MathReasoning(BaseModel):
-                #     steps: list[str]
-                # format_config = {
-                #     "name" : "matching_response",
-                #     "type": "json_schema",
-                #     "schema": {
-                #             "type": "object",
-                #             "properties": {
-                #                 "matches": {
-                #                     "type": "array",
-                #                     "items": {
-                #                         "type": "string"
-                #                     }
-                #                 }
-                #             },
-                #             "required": ["matches"],
-                #             "additionalProperties": False
-                #     }
-                # }
-                
-                # matching_prompt = f"""Given the fact, identify the corresponding words "
-                #     "in the original sentence that help derive this fact."
-                #     "Please list all words within the original sentence that are related to the fact, "
-                #     "in the order they appear in the original sentence, "
-                #     "each word separated by comma."
-                #     "\nFact: {atom}\n"
-                #     "Sentence: {sent}\n"
-                #     "Words within the sentence: {gen_words}"
-                #     Words within sentence that helps to derive the fact, in the original order, separated by comma: """
-                
-                # output, response = self.lm.generate(prompt=matching_prompt, response_format=format_config)
-                # match_data = json.loads(output)
-                # logging.info(match_data)
-                # match_words = match_data["matches"]
-
                 set_gen_words = set(word.lower() for word in gen_words)   # set = fast lookups, order untouched
+                # maybe switch to atom?
                 match_words = [w for w in word_tokenize(sent.lower()) if w in set_gen_words]
 
                 print("matched words:", match_words)
