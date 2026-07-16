@@ -78,6 +78,10 @@ class FactScorer(object):
         else:
             self.lm = None
 
+        self.backup_lm = OpenAIModel(model_name='gpt-5.6-terra',
+                                  cache_file=os.path.join(cache_dir, "ChatGPT.pkl"),
+                                  key_path=openai_key)
+
     def save_cache(self):
         if self.lm:
             self.lm.save_cache()
@@ -288,20 +292,29 @@ class FactScorer(object):
                         \nDetermine if the derived fact is true or false.
                         \nGenerated answer: {generation}
                         \nDerived Fact: {atom} True or False?\nOutput:"""
+
+                    if cost_estimate:
+                        if cost_estimate == "consider_cache" and (prompt.strip() + "_0") not in self.lm.cache_dict:
+                            total_words += len(prompt.split())
+                        elif cost_estimate == "ignore_cache":
+                            total_words += len(prompt.split())
+                        continue
+
+                    output = self.lm.generate(prompt)
                 else: 
                     prompt = f"""You are given a generated answer, a derived fact from the generated answer to the question {question}.
                     \nDetermine if the derived fact is true or false. If you are unsure, do a websearch to determine the answers.
                     \nGenerated answer: {generation}
                     \nDerived Fact: {atom} True or False?\nOutput:"""
                     
-                if cost_estimate:
-                    if cost_estimate == "consider_cache" and (prompt.strip() + "_0") not in self.lm.cache_dict:
-                        total_words += len(prompt.split())
-                    elif cost_estimate == "ignore_cache":
-                        total_words += len(prompt.split())
-                    continue
+                    if cost_estimate:
+                        if cost_estimate == "consider_cache" and (prompt.strip() + "_0") not in self.lm.cache_dict:
+                            total_words += len(prompt.split())
+                        elif cost_estimate == "ignore_cache":
+                            total_words += len(prompt.split())
+                        continue
 
-                output = self.lm.generate(prompt)
+                    output = self.lm_backup.generate(prompt)
 
                 if type(output[1])==np.ndarray:
                     # when logits are available
