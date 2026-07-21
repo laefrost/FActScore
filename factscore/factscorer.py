@@ -299,7 +299,7 @@ class FactScorer(object):
                         elif cost_estimate == "ignore_cache":
                             total_words += len(prompt.split())
                         continue
-
+                    print("--------------------------",prompt)
                     output = self.lm.generate(prompt)
                 else: 
                     prompt = f"""You are given a generated answer, a derived fact from the generated answer to the question {question}.
