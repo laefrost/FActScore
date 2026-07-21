@@ -161,7 +161,6 @@ class FactScorer(object):
             assert len(topics)==len(generations), "`topics` and `generations` should have the same length"
 
         if atomic_facts is not None:
-            print("Got atomic facts")
             assert len(topics)==len(atomic_facts), "`topics` and `atomic_facts` should have the same length"
             corresponding_sentences = atomic_facts
         else:
@@ -224,8 +223,6 @@ class FactScorer(object):
         score_list = []
         init_scores = []
         decisions = []
-        print('length atomic facts: ', len(atomic_facts))
-        print('length sentences: ', len(corresponding_sentences))
         
         if questions is None: 
             questions = [None] * len(generations)
@@ -272,7 +269,6 @@ class FactScorer(object):
     def _get_score(self, topic, generation, atomic_facts, sentences, knowledge_source = None, cost_estimate=None, do_matching = False, question = None, gen_words = None, word_tokens = None, tokenizer_name = None):
         decisions = []
         total_words = 0
-        print('length in _get_score',len(atomic_facts), len(sentences))
         for atom, sent in zip(atomic_facts, sentences):
             atom = atom.strip()
             if self.lm:
@@ -289,7 +285,6 @@ class FactScorer(object):
                             definition += "."
                         prompt = "{}\n\nInput: {} True or False?\nOutput:".format(definition.strip(), atom.strip())
                     except Exception as e:
-                        print(f"Retrieval failed: {e}")
                         prompt = f"""You are given a derived fact from the generated answer to the question {question}.
                         \nDetermine if the derived fact is true or false.
                         \nDerived Fact: {atom} True or False?\nOutput:"""
@@ -300,7 +295,6 @@ class FactScorer(object):
                         elif cost_estimate == "ignore_cache":
                             total_words += len(prompt.split())
                         continue
-                    print("--------------------------",prompt)
                     output = self.lm.generate(prompt)
                 else: 
                     prompt = f"""You are given a generated answer, a derived fact from the generated answer to the question {question}.
@@ -348,9 +342,6 @@ class FactScorer(object):
                 set_gen_words = set(word.lower() for word in gen_words)   # set = fast lookups, order untouched
                 # maybe switch to atom?
                 match_words = [w for w in word_tokenize(sent.lower()) if w in set_gen_words]
-
-                print("matched words:", match_words)
-
                 matched_word_indices, token_indices, word_token_indices = self._match_string(sent, match_words, gen_words, word_tokens, tokenizer_name)
             else:
                 match_words = gen_words
@@ -374,9 +365,6 @@ class FactScorer(object):
     def _match_string(self, sentence, matched_words, generated_words, word_tokens, tokenizer_name): 
         
         #tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-        
-        print("sentence", sentence)
-        print("matched_words", matched_words)
         
         # def find_sentence(generated_words, word_tokens, sentence): 
         #     print(sentence)
