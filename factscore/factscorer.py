@@ -288,7 +288,8 @@ class FactScorer(object):
                         if not definition[-1] in string.punctuation:
                             definition += "."
                         prompt = "{}\n\nInput: {} True or False?\nOutput:".format(definition.strip(), atom.strip())
-                    except:
+                    except Exception as e:
+                        print(f"Retrieval failed: {e}")
                         prompt = f"""You are given a derived fact from the generated answer to the question {question}.
                         \nDetermine if the derived fact is true or false.
                         \nDerived Fact: {atom} True or False?\nOutput:"""
