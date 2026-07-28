@@ -26,6 +26,115 @@ nltk.download("punkt_tab")  # one-time download
 from nltk.tokenize import word_tokenize
 
 
+# The verdict prompts were written for a completion model emitting a single
+# token. Chat models answer in prose, so the output is constrained twice: with a
+# json_schema response format for backends that support it (OpenAI), and with an
+# explicit one-word instruction for those that ignore it.
+VERDICT_INSTRUCTION = "Answer with exactly one word: True or False."
+
+VERDICT_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "name": "fact_verdict",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {"verdict": {"type": "string", "enum": ["True", "False"]}},
+        "required": ["verdict"],
+        "additionalProperties": False,
+    },
+}
+
+
+# Surface forms of the verdict tokens, most vocabulary-specific first:
+# "▁True" is SentencePiece (LLaMA-1/2), "ĠTrue" is byte-level BPE (GPT-2/o200k).
+_TRUE_SURFACES = ("▁True", "ĠTrue", " True", "True")
+_FALSE_SURFACES = ("▁False", "ĠFalse", " False", "False")
+
+
+def _single_token_id(tokenizer, surfaces):
+    unk_id = getattr(tokenizer, "unk_token_id", None)
+    for surface in surfaces:
+        try:
+            token_id = tokenizer.convert_tokens_to_ids(surface)
+        except Exception:
+            token_id = None
+        if isinstance(token_id, int) and token_id >= 0 and token_id != unk_id:
+            return token_id
+        try:
+            ids = tokenizer.encode(surface, add_special_tokens=False)
+        except Exception:
+            ids = []
+        if len(ids) == 1 and ids[0] != unk_id:
+            return ids[0]
+    return None
+
+
+def verdict_token_ids(lm):
+    """(true_id, false_id) in lm's own vocabulary, or None if they can't be resolved.
+
+    The ids used to be hardcoded to 5852 / 7700, which are ``_True`` / ``_False``
+    in the LLaMA-1/2 SentencePiece vocabulary only; the same offsets are
+    arbitrary tokens in any other vocabulary.
+    """
+    cached = getattr(lm, "_verdict_token_ids_cache", None)
+    if cached is not None:
+        return cached or None
+
+    tokenizer = getattr(lm, "tokenizer", None)
+    ids = None
+    if tokenizer is not None:
+        true_id = _single_token_id(tokenizer, _TRUE_SURFACES)
+        false_id = _single_token_id(tokenizer, _FALSE_SURFACES)
+        if true_id is not None and false_id is not None and true_id != false_id:
+            ids = (true_id, false_id)
+
+    if ids is None:
+        logging.warning(
+            "Could not resolve True/False token ids for %s; scoring from decoded text instead.",
+            getattr(lm, "model_name", type(lm).__name__))
+    lm._verdict_token_ids_cache = ids or False
+    return ids
+
+
+def parse_verdict(generated_answer):
+    """Map a model answer onto True / False, or None when it cannot be read.
+
+    Never guesses: an answer that is not an unambiguous verdict returns None so
+    the caller can flag it instead of silently counting it as supported.
+    """
+    if generated_answer is None:
+        return None
+
+    text = generated_answer.strip()
+    if not text:
+        return None
+
+    # constrained backends return {"verdict": "True"}
+    try:
+        payload = json.loads(text)
+    except (ValueError, TypeError):
+        payload = None
+    if isinstance(payload, dict):
+        verdict = payload.get("verdict")
+        if isinstance(verdict, str) and verdict.strip().lower() in ("true", "false"):
+            return verdict.strip().lower() == "true"
+        if isinstance(verdict, bool):
+            return verdict
+        return None
+
+    words = text.lower().translate(str.maketrans("", "", string.punctuation)).split()
+    if not words:
+        return None
+    if words[0] in ("true", "false"):
+        return words[0] == "true"
+
+    has_true = "true" in words
+    has_false = "false" in words
+    if has_true != has_false:
+        return has_true
+    return None
+
+
 class FactScorer(object):
 
     def __init__(self,
@@ -187,6 +296,8 @@ class FactScorer(object):
                 response_abstained = is_response_abstained(gen, self.abstain_detection_type)
                 if response_abstained:
                     atomic_facts.append(None)
+                    # Maybe remove
+                    corresponding_sentences.append(None)
                     continue
                 # continue only when the response is not abstained
                 curr_afs_og, _ = self.af_generator.run(gen)
@@ -237,8 +348,11 @@ class FactScorer(object):
                 decisions.append(None)
             else:
                 decision = self._get_score(topic, generation, facts, sentences, knowledge_source, question=question, do_matching=do_matching, gen_words=gen_word, word_tokens = wt, tokenizer_name = tokenizer_name)
-                score = np.mean([d["is_supported"] for d in decision])
-                sents = [d["sentence"] for d in decision]                
+                # atoms whose verdict could not be parsed are excluded, not counted as supported
+                verdicts = [d["is_supported"] for d in decision if d["is_supported"] is not None]
+                num_unparsed = len(decision) - len(verdicts)
+                score = np.mean(verdicts) if verdicts else np.nan
+                sents = [d["sentence"] for d in decision]
                 # if gamma:
                 #     init_scores.append(score)
                 #     penalty = 1.0 if len(facts)>gamma else np.exp(1-gamma/len(facts))
@@ -246,7 +360,7 @@ class FactScorer(object):
                 
                 decisions.append(decision)
                 scores.append(score)
-                score_list.append({"facts" : facts, "sentence" : sents, "score" : score, "generation" : generation, "topic" : topic})
+                score_list.append({"facts" : facts, "sentence" : sents, "score" : score, "generation" : generation, "topic" : topic, "num_unparsed" : num_unparsed})
                 if len(scores) % 10 == 0:
                     self.save_cache()
         self.save_cache()
@@ -255,7 +369,7 @@ class FactScorer(object):
                 # scores across facts in generation
                 "scores" : score_list, 
                 # score for all generation
-                "score": np.mean(scores),
+                "score": np.nanmean(scores) if scores else np.nan,
                 "respond_ratio": respond_ratio,
                 "decisions": decisions,
                 "sentences" : corresponding_sentences,
@@ -271,10 +385,24 @@ class FactScorer(object):
         total_words = 0
         for atom, sent in zip(atomic_facts, sentences):
             atom = atom.strip()
+            retrieval_failed = False
+            parse_failed = False
             if self.lm:
-                if knowledge_source != None: 
+                if knowledge_source != None:
                     try:
                         passages = self.retrieval[knowledge_source].get_passages(topic, atom, k=5)
+                    except Exception as e:
+                        print(repr(e))
+                        retrieval_failed = True
+                        passages = None
+
+                    if retrieval_failed:
+                        # no context available: fall back to a context-free judgement
+                        prompt = f"""You are given a derived fact from the generated answer about {topic}.
+                        \nDetermine if the derived fact is true or false.
+                        \n{VERDICT_INSTRUCTION}
+                        \nDerived Fact: {atom} True or False?\nOutput:"""
+                    else:
                         definition = "Answer the question about {} based on the given context.\n\n".format(topic)
                         context = ""
                         print("---------------- len passages", len(passages))
@@ -283,11 +411,8 @@ class FactScorer(object):
                         definition += context.strip()
                         if not definition[-1] in string.punctuation:
                             definition += "."
-                        prompt = "{}\n\nInput: {} True or False?\nOutput:".format(definition.strip(), atom.strip())
-                    except Exception as e:
-                        prompt = f"""You are given a derived fact from the generated answer to the question {question}.
-                        \nDetermine if the derived fact is true or false.
-                        \nDerived Fact: {atom} True or False?\nOutput:"""
+                        prompt = "{}\n\nInput: {} True or False?\n{}\nOutput:".format(
+                            definition.strip(), atom.strip(), VERDICT_INSTRUCTION)
 
                     if cost_estimate:
                         if cost_estimate == "consider_cache" and (prompt.strip() + "_0") not in self.lm.cache_dict:
@@ -295,10 +420,12 @@ class FactScorer(object):
                         elif cost_estimate == "ignore_cache":
                             total_words += len(prompt.split())
                         continue
-                    output = self.lm.generate(prompt)
-                else: 
+                    lm_used = self.lm
+                    output = lm_used.generate(prompt, response_format=VERDICT_RESPONSE_FORMAT)
+                else:
                     prompt = f"""You are given a generated answer, a derived fact from the generated answer to the question {question}.
                     \nDetermine if the derived fact is true or false. If you are unsure, do a websearch to determine the answers.
+                    \n{VERDICT_INSTRUCTION}
                     \nGenerated answer: {generation}
                     \nDerived Fact: {atom} True or False?\nOutput:"""
                     
@@ -309,27 +436,21 @@ class FactScorer(object):
                             total_words += len(prompt.split())
                         continue
 
-                    output = self.lm_backup.generate(prompt)
+                    lm_used = self.backup_lm
+                    output = lm_used.generate(prompt, response_format=VERDICT_RESPONSE_FORMAT)
 
-                if type(output[1])==np.ndarray:
-                    # when logits are available
-                    logits = np.array(output[1])
-                    assert logits.shape[0] in [32000, 32001]
-                    true_score = logits[5852]
-                    false_score = logits[7700]
-                    is_supported = true_score > false_score
+                logits = output[1] if isinstance(output[1], np.ndarray) else None
+                verdict_ids = verdict_token_ids(lm_used) if logits is not None else None
+                if verdict_ids is not None and max(verdict_ids) < logits.shape[0]:
+                    # when logits are available and the vocabulary is known
+                    true_id, false_id = verdict_ids
+                    is_supported = bool(logits[true_id] > logits[false_id])
                 else:
-                    # when logits are unavailable
-                    generated_answer = output[0].lower()
-                    if "true" in generated_answer or "false" in generated_answer:
-                        if "true" in generated_answer and "false" not in generated_answer:
-                            is_supported = True
-                        elif "false" in generated_answer and "true" not in generated_answer:
-                            is_supported = False
-                        else:
-                            is_supported = generated_answer.index("true") > generated_answer.index("false")
-                    else:
-                        is_supported = all([keyword not in generated_answer.lower().translate(str.maketrans("", "", string.punctuation)).split() for keyword in ["not", "cannot", "unknown", "information"]])
+                    # no logits, or a vocabulary we cannot index: read the decoded text
+                    is_supported = parse_verdict(output[0])
+                    if is_supported is None:
+                        parse_failed = True
+                        print("unparseable verdict: {!r}".format(output[0]))
 
             else:
                 is_supported = True
@@ -350,7 +471,10 @@ class FactScorer(object):
                 word_token_indices = None
 
             decisions.append({"atom": atom,
+                              # True / False, or None when the verdict was unparseable
                               "is_supported": is_supported,
+                              "retrieval_failed": retrieval_failed,
+                              "parse_failed": parse_failed,
                               "sentence" : sent,
                               "matched_words" : match_words,
                               "matched_word_indices" : matched_word_indices,
