@@ -8,6 +8,9 @@ import logging
 
 class HFInf(LM):
 
+    # remote inference endpoint: requests can overlap
+    max_concurrency = 8
+
     def __init__(self, model_name, model_id, cache_file=None):
         self.model_name = model_name
         self.model_id = model_id

@@ -1,28 +1,69 @@
 from factscore.lm import LM
 import openai
+import math
 import sys
 import time
 import os
 import numpy as np
 import logging
 
+from collections import namedtuple
 from factscore.lm import LM
 from openai import OpenAI
-import sys
-import time
-import os
-import numpy as np
-import logging
+
+
+# A True/False verdict is a classification, not something to think through, so
+# the reasoning models are asked for no reasoning at all. Reasoning models bill
+# hidden reasoning tokens as output, and at any effort above "none" a one-word
+# verdict can cost hundreds of output tokens.
+Route = namedtuple("Route", "needle api_model is_reasoning reasoning_effort")
+
+# Order matters: the first substring hit wins, which is how the original
+# if/elif chain resolved names like "retrieval+gpt-4o-mini".
+MODEL_ROUTES = (
+    Route("ChatGPT", "gpt-5-mini", True, None),
+    Route("gpt-5.6-luna", "gpt-5.6-luna", True, "none"),
+    Route("gpt-5.6-terra", "gpt-5.6-terra", True, "none"),
+    Route("gpt-5-mini", "gpt-5-mini", True, None),
+    Route("gpt-4o-mini", "gpt-4o-mini", False, None),
+    Route("gpt-4.1-mini", "gpt-4.1-mini", False, None),
+    Route("gpt-4.1-nano", "gpt-4.1-nano", False, None),
+)
+
+# Reasoning models also reject temperature and logprobs, so those are only sent
+# to the others. max_output_tokens is withheld from them too: if reasoning does
+# happen it can consume the whole budget and return an empty output_text.
+
+MAX_RETRIES = 8
+MAX_BACKOFF_SECONDS = 60
+
+
+def resolve_route(model_name):
+    for route in MODEL_ROUTES:
+        if route.needle in model_name:
+            return route
+    raise NotImplementedError(f"Unknown model: {model_name}")
 
 
 class OpenAIModel(LM):
 
-    def __init__(self, model_name, cache_file=None, key_path="api.key"):
+    # the OpenAI client is thread-safe, so verdicts for independent atoms can be
+    # requested in parallel
+    max_concurrency = 8
+
+    def __init__(self, model_name, cache_file=None, key_path="api.key", max_concurrency=None,
+                 temp=0.0, reasoning_effort=None):
         self.model_name = model_name
         self.key_path = key_path
-        self.temp = 0.7
+        # a True/False verdict is a classification; sampling only adds noise and
+        # makes runs unreproducible
+        self.temp = temp
+        # overrides the route's default; ignored by non-reasoning models
+        self.reasoning_effort = reasoning_effort
         self.save_interval = 100
         self.client = None
+        if max_concurrency is not None:
+            self.max_concurrency = max_concurrency
         super().__init__(cache_file)
 
     def load_model(self):
@@ -32,58 +73,9 @@ class OpenAIModel(LM):
         self.model = self.model_name
 
     def _generate(self, prompt, max_sequence_length=2048, max_output_length=128, response_format = None):
-        if self.add_n % self.save_interval == 0:
-            self.save_cache()
+        self.maybe_autosave(self.save_interval)
 
-        if "ChatGPT" in self.model_name:
-            response = call_chat_model(
-                client=self.client,
-                prompt=prompt,
-                model_name="gpt-5-mini",
-                temp=self.temp,
-                max_output_tokens=max_output_length,
-                response_format=response_format
-            )
-            output = response["output_text"]
-            return output, response
-        
-        elif "gpt-5.6-luna" in self.model_name:
-            response = call_chat_model(
-                client=self.client,
-                prompt=prompt,
-                model_name="gpt-5.6-luna",
-                temp=self.temp,
-                max_output_tokens=max_output_length,
-                response_format=response_format
-            )
-            output = response["output_text"]
-            return output, response
-        
-        elif "gpt-5-mini" in self.model_name:
-            response = call_chat_model(
-                client=self.client,
-                prompt=prompt,
-                model_name="gpt-5-mini",
-                temp=self.temp,
-                max_output_tokens=max_output_length,
-                response_format=response_format
-            )
-            output = response["output_text"]
-            return output, response
-        
-        elif "gpt-4o-mini" in self.model_name:
-            response = call_chat_model(
-                client=self.client,
-                prompt=prompt,
-                model_name="gpt-4o-mini",
-                temp=self.temp,
-                max_output_tokens=max_output_length,
-                response_format=response_format
-            )
-            output = response["output_text"]
-            return output, response
-
-        elif self.model_name == "InstructGPT":
+        if self.model_name == "InstructGPT":
             response = call_instruct_model(
                 client=self.client,
                 prompt=prompt,
@@ -91,11 +83,81 @@ class OpenAIModel(LM):
                 temp=self.temp,
                 max_output_tokens=max_output_length
             )
-            output = response["output_text"]
-            return output, response
+            return response["output_text"], response
 
-        else:
-            raise NotImplementedError(f"Unknown model: {self.model_name}")
+        route = resolve_route(self.model_name)
+        response = call_chat_model(
+            client=self.client,
+            prompt=prompt,
+            model_name=route.api_model,
+            temp=self.temp,
+            max_output_tokens=max_output_length,
+            response_format=response_format,
+            is_reasoning=route.is_reasoning,
+            reasoning_effort=self.reasoning_effort or route.reasoning_effort,
+        )
+        return response["output_text"], response
+
+
+def should_retry(error):
+    """Rate limits, timeouts and 5xx are transient; a 400 will never succeed."""
+    transient = (openai.RateLimitError, openai.APIConnectionError, openai.APITimeoutError)
+    if isinstance(error, transient):
+        return True
+    status = getattr(error, "status_code", None)
+    return status is not None and status >= 500
+
+
+def call_with_retries(send, description):
+    """Run send(), backing off on transient errors and giving up eventually.
+
+    The old loop retried every exception forever and never reset its counter, so
+    a permanent 400 would spin at 2**n seconds without ever surfacing — with
+    several requests in flight that is easy to mistake for a hung run.
+    """
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            return send()
+        except Exception as e:
+            if not should_retry(e) or attempt == MAX_RETRIES:
+                logging.critical("API error on %s, giving up after %d attempt(s): %s",
+                                 description, attempt, str(e))
+                raise
+            wait = min(2 ** attempt, MAX_BACKOFF_SECONDS)
+            logging.error("API error: %s (%d/%d). Waiting %d sec",
+                          str(e), attempt, MAX_RETRIES, wait)
+            time.sleep(wait)
+
+
+def verdict_word(token):
+    """The token's text as a bare verdict word, or None if it isn't one."""
+    cleaned = (token or "").strip().strip('"').strip().lower()
+    return cleaned if cleaned in ("true", "false") else None
+
+
+def verdict_probability(response):
+    """P(True) read off the token logprobs, or None when they weren't returned.
+
+    Scores the first token that is itself a verdict word — under the json_schema
+    format that is the one inside {"verdict": ...} — and renormalises over the
+    True/False alternatives at that position, ignoring the rest of the vocabulary.
+    """
+    for item in getattr(response, "output", None) or []:
+        for content in getattr(item, "content", None) or []:
+            for entry in getattr(content, "logprobs", None) or []:
+                if verdict_word(getattr(entry, "token", None)) is None:
+                    continue
+                mass = {"true": 0.0, "false": 0.0}
+                alternatives = list(getattr(entry, "top_logprobs", None) or []) or [entry]
+                for alternative in alternatives:
+                    word = verdict_word(getattr(alternative, "token", None))
+                    logprob = getattr(alternative, "logprob", None)
+                    if word is not None and logprob is not None:
+                        mass[word] += math.exp(logprob)
+                total = mass["true"] + mass["false"]
+                if total > 0:
+                    return mass["true"] / total
+    return None
 
 
 def call_chat_model(
@@ -103,62 +165,42 @@ def call_chat_model(
     prompt,
     model_name="gpt-4o-mini",  # Fixed model name
     max_output_tokens=512,
-    temp=0.7,
-    response_format = None
+    temp=0.0,
+    response_format = None,
+    is_reasoning = False,
+    reasoning_effort = "none",
+    top_logprobs = 5,
 ):
-    received = False
-    num_rate_errors = 0
-    response = None
-    
-    while not received:
-        try:
-            if response_format is None: 
-                response = client.responses.create(
-                    model=model_name,
-                    input= [  # Correct parameter name
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
-                    ]
-                )
-                output_text = response.output_text
-            else: 
-                response = client.responses.create(
-                    model=model_name,
-                    input= [  # Correct parameter name
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
-                    ],
-                    text = {
-                        "format" : response_format}
-                )
-                output_text = response.output_text
-                # response = client.chat.completions.create(
-                # model=model_name,
-                # messages=[
-                #     # {"role": "system", "content": "You are a helpful math tutor. Guide the user through the solution step by step."},
-                #     {"role": "user", "content": prompt}
-                #     ],
-                #     response_format=response_format,
-                # )
-                # output_text = response.choices[0].message.content
-            received = True
-        except Exception as e:
-            num_rate_errors += 1
-            logging.error(
-                "API error: %s (%d). Waiting %d sec",
-                str(e),
-                num_rate_errors,
-                2 ** num_rate_errors
-            )
-            time.sleep(2 ** num_rate_errors)
-    
+    kwargs = {
+        "model": model_name,
+        "input": [  # Correct parameter name
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+    }
+    if response_format is not None:
+        kwargs["text"] = {"format": response_format}
+    if is_reasoning:
+        if reasoning_effort is not None:
+            kwargs["reasoning"] = {"effort": reasoning_effort}
+    else:
+        # a reasoning model rejects both of these, and a token cap can leave it
+        # returning an empty output_text after spending the budget on reasoning
+        kwargs["temperature"] = temp
+        kwargs["max_output_tokens"] = max_output_tokens
+        if top_logprobs:
+            kwargs["top_logprobs"] = top_logprobs
+
+    response = call_with_retries(lambda: client.responses.create(**kwargs),
+                                 f"{model_name} verdict")
+
     return {
         "raw_response": response,
-        "output_text": output_text  # Correct attribute path
+        "output_text": response.output_text,  # Correct attribute path
+        # None unless the model returned logprobs
+        "p_true": verdict_probability(response),
     }
 
 def call_instruct_model(
@@ -166,34 +208,21 @@ def call_instruct_model(
     prompt,
     model_name="gpt-3.5-turbo-instruct",
     max_output_tokens=512,
-    temp=0.7,
+    temp=0.0,
 ):
-    received = False
-    num_rate_errors = 0
-    response = None
-    
-    while not received:
-        try:
-            response = client.completions.create(  # Correct method
-                model=model_name,
-                prompt=prompt,  # Correct parameter name
-                max_tokens=max_output_tokens,  # Correct parameter name
-                temperature=temp,
-            )
-            received = True
-        except Exception as e:
-            num_rate_errors += 1
-            logging.error(
-                "API error: %s (%d). Waiting %d sec",
-                str(e),
-                num_rate_errors,
-                2 ** num_rate_errors
-            )
-            time.sleep(2 ** num_rate_errors)
-    
+    response = call_with_retries(
+        lambda: client.completions.create(  # Correct method
+            model=model_name,
+            prompt=prompt,  # Correct parameter name
+            max_tokens=max_output_tokens,  # Correct parameter name
+            temperature=temp,
+        ),
+        f"{model_name} completion")
+
     return {
         "raw_response": response,
-        "output_text": response.choices[0].text  # Correct attribute path
+        "output_text": response.choices[0].text,  # Correct attribute path
+        "p_true": None,
     }
 
 

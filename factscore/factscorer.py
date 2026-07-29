@@ -145,7 +145,9 @@ class FactScorer(object):
                  openai_key="api.key",
                  cost_estimate="consider_cache",
                  abstain_detection_type=None,
-                 batch_size=256):
+                 batch_size=256,
+                 max_workers=None,
+                 reasoning_effort=None):
         assert model_name in ["retrieval+llama", "retrieval+llama+npm", "retrieval+ChatGPT", "npm", 
                               "retrieval+ChatGPT+npm", "ChatGPT", "gpt-oss", "retrieval+gpt-oss-20b", 
                               "hf-inf", "retrieval+hf-inf", "gpt-4o-mini", "gpt-5-mini", "gpt-5.6-luna",
@@ -187,9 +189,24 @@ class FactScorer(object):
         else:
             self.lm = None
 
-        self.backup_lm = OpenAIModel(model_name='gpt-5.6-terra',
+        # non-reasoning, so verdicts come back with logprobs attached
+        self.backup_lm = OpenAIModel(model_name='gpt-4o-mini',
                                   cache_file=os.path.join(cache_dir, "ChatGPT.pkl"),
                                   key_path=openai_key)
+
+        # verdict requests for different atoms are independent, so they are sent
+        # concurrently; lower this if the API account's rate limit is tight
+        if max_workers is not None:
+            for lm in (self.lm, self.backup_lm):
+                if lm is not None:
+                    lm.max_concurrency = max_workers
+
+        # overrides the per-model default in openai_lm.MODEL_ROUTES; only the
+        # reasoning models look at it
+        if reasoning_effort is not None:
+            for lm in (self.lm, self.backup_lm):
+                if isinstance(lm, OpenAIModel):
+                    lm.reasoning_effort = reasoning_effort
 
     def save_cache(self):
         if self.lm:
@@ -343,11 +360,37 @@ class FactScorer(object):
             true_answers = [None] * len(generations)
         
         
-        for topic, generation, facts, sentences, true_answer, question, gen_word, wt in zip(topics, generations, atomic_facts, corresponding_sentences, true_answers, questions, gen_words, word_tokens):
+        rows = list(zip(topics, generations, atomic_facts, corresponding_sentences,
+                        true_answers, questions, gen_words, word_tokens))
+
+        # Phase 1 (serial): render every verdict prompt up front. Retrieval has to
+        # stay on one thread — DocDB holds a sqlite connection and Retrieval
+        # mutates its cache unguarded.
+        requests_per_row = []
+        for topic, generation, facts, sentences, true_answer, question, gen_word, wt in rows:
             if facts is None:
+                requests_per_row.append(None)
+                continue
+            requests, _ = self._build_score_requests(topic, generation, facts, sentences,
+                                                     knowledge_source, question=question)
+            requests_per_row.append(requests)
+            if len(requests_per_row) % 10 == 0:
+                self.save_cache()
+        self.save_cache()
+
+        # Phase 2 (parallel): one flat pool across all generations, so the
+        # in-flight budget stays filled even when a single generation has few atoms.
+        self._run_score_requests([request
+                                  for requests in requests_per_row if requests
+                                  for request in requests])
+
+        # Phase 3 (serial): verdict parsing, npm and matching are all local work.
+        for row, requests in zip(rows, requests_per_row):
+            topic, generation, facts, sentences, true_answer, question, gen_word, wt = row
+            if requests is None:
                 decisions.append(None)
             else:
-                decision = self._get_score(topic, generation, facts, sentences, knowledge_source, question=question, do_matching=do_matching, gen_words=gen_word, word_tokens = wt, tokenizer_name = tokenizer_name)
+                decision = self._finalize_decisions(requests, knowledge_source, do_matching=do_matching, gen_words=gen_word, word_tokens = wt, tokenizer_name = tokenizer_name)
                 # atoms whose verdict could not be parsed are excluded, not counted as supported
                 verdicts = [d["is_supported"] for d in decision if d["is_supported"] is not None]
                 num_unparsed = len(decision) - len(verdicts)
@@ -357,7 +400,7 @@ class FactScorer(object):
                 #     init_scores.append(score)
                 #     penalty = 1.0 if len(facts)>gamma else np.exp(1-gamma/len(facts))
                 #     score = penalty * score
-                
+
                 decisions.append(decision)
                 scores.append(score)
                 score_list.append({"facts" : facts, "sentence" : sents, "score" : score, "generation" : generation, "topic" : topic, "num_unparsed" : num_unparsed})
@@ -381,12 +424,37 @@ class FactScorer(object):
         return out
 
     def _get_score(self, topic, generation, atomic_facts, sentences, knowledge_source = None, cost_estimate=None, do_matching = False, question = None, gen_words = None, word_tokens = None, tokenizer_name = None):
-        decisions = []
+        """Score one generation: build the prompts, dispatch them, read the verdicts.
+
+        get_score() runs the same three phases itself, pooling the dispatch across
+        every generation at once; this path is for single-generation callers.
+        """
+        requests, total_words = self._build_score_requests(
+            topic, generation, atomic_facts, sentences, knowledge_source,
+            cost_estimate=cost_estimate, question=question)
+
+        if cost_estimate:
+            return total_words
+
+        self._run_score_requests(requests)
+        return self._finalize_decisions(requests, knowledge_source, do_matching=do_matching,
+                                        gen_words=gen_words, word_tokens=word_tokens,
+                                        tokenizer_name=tokenizer_name)
+
+    def _build_score_requests(self, topic, generation, atomic_facts, sentences, knowledge_source = None, cost_estimate=None, question = None):
+        """One pending request per atom, with its prompt already rendered.
+
+        Serial by design: this is the phase that hits retrieval. Returns
+        (requests, total_words); the word count is only meaningful under
+        cost_estimate, which short-circuits before any request is queued.
+        """
+        requests = []
         total_words = 0
         for atom, sent in zip(atomic_facts, sentences):
             atom = atom.strip()
             retrieval_failed = False
-            parse_failed = False
+            prompt = None
+            lm_used = None
             if self.lm:
                 if knowledge_source != None:
                     try:
@@ -414,37 +482,78 @@ class FactScorer(object):
                         prompt = "{}\n\nInput: {} True or False?\n{}\nOutput:".format(
                             definition.strip(), atom.strip(), VERDICT_INSTRUCTION)
 
-                    if cost_estimate:
-                        if cost_estimate == "consider_cache" and (prompt.strip() + "_0") not in self.lm.cache_dict:
-                            total_words += len(prompt.split())
-                        elif cost_estimate == "ignore_cache":
-                            total_words += len(prompt.split())
-                        continue
                     lm_used = self.lm
-                    output = lm_used.generate(prompt, response_format=VERDICT_RESPONSE_FORMAT)
                 else:
                     prompt = f"""You are given a generated answer, a derived fact from the generated answer to the question {question}.
                     \nDetermine if the derived fact is true or false. If you are unsure, do a websearch to determine the answers.
                     \n{VERDICT_INSTRUCTION}
                     \nGenerated answer: {generation}
                     \nDerived Fact: {atom} True or False?\nOutput:"""
-                    
-                    if cost_estimate:
-                        if cost_estimate == "consider_cache" and (prompt.strip() + "_0") not in self.lm.cache_dict:
-                            total_words += len(prompt.split())
-                        elif cost_estimate == "ignore_cache":
-                            total_words += len(prompt.split())
-                        continue
 
-                    lm_used = self.backup_lm
-                    output = lm_used.generate(prompt, response_format=VERDICT_RESPONSE_FORMAT)
+                    lm_used = self.lm
 
-                logits = output[1] if isinstance(output[1], np.ndarray) else None
+                if cost_estimate:
+                    if cost_estimate == "consider_cache" and (prompt.strip() + "_0") not in self.lm.cache_dict:
+                        total_words += len(prompt.split())
+                    elif cost_estimate == "ignore_cache":
+                        total_words += len(prompt.split())
+                    continue
+
+            requests.append({"topic": topic,
+                             "atom": atom,
+                             "sentence": sent,
+                             "prompt": prompt,
+                             "lm": lm_used,
+                             "retrieval_failed": retrieval_failed,
+                             # filled in by _run_score_requests; stays None when
+                             # there is no lm to ask
+                             "output": None})
+
+        return requests, total_words
+
+    def _run_score_requests(self, requests):
+        """Answer every pending prompt, one concurrent pool per backend."""
+        by_backend = defaultdict(list)
+        for request in requests:
+            if request["prompt"] is not None:
+                by_backend[id(request["lm"])].append(request)
+
+        for grouped in by_backend.values():
+            lm_used = grouped[0]["lm"]
+            outputs = lm_used.generate_batch([request["prompt"] for request in grouped],
+                                             response_format=VERDICT_RESPONSE_FORMAT)
+            for request, output in zip(grouped, outputs):
+                request["output"] = output
+
+    def _finalize_decisions(self, requests, knowledge_source = None, do_matching = False, gen_words = None, word_tokens = None, tokenizer_name = None):
+        """Turn answered requests into decision records. Local work only."""
+        decisions = []
+        for request in requests:
+            atom = request["atom"]
+            sent = request["sentence"]
+            output = request["output"]
+            parse_failed = False
+            p_true = None
+
+            if output is None:
+                # no lm configured for this run
+                is_supported = True
+            else:
+                lm_used = request["lm"]
+                metadata = output[1]
+                logits = metadata if isinstance(metadata, np.ndarray) else None
                 verdict_ids = verdict_token_ids(lm_used) if logits is not None else None
+                # API backends have no local vocabulary to index, so they report
+                # P(True) directly instead of raw logits
+                if isinstance(metadata, dict):
+                    p_true = metadata.get("p_true")
+
                 if verdict_ids is not None and max(verdict_ids) < logits.shape[0]:
                     # when logits are available and the vocabulary is known
                     true_id, false_id = verdict_ids
                     is_supported = bool(logits[true_id] > logits[false_id])
+                elif p_true is not None:
+                    is_supported = bool(p_true > 0.5)
                 else:
                     # no logits, or a vocabulary we cannot index: read the decoded text
                     is_supported = parse_verdict(output[0])
@@ -452,14 +561,11 @@ class FactScorer(object):
                         parse_failed = True
                         print("unparseable verdict: {!r}".format(output[0]))
 
-            else:
-                is_supported = True
-
             if is_supported and "npm" in self.model_name:
-                npprob = self.npm[knowledge_source].get_probabilty(topic, atom)
+                npprob = self.npm[knowledge_source].get_probabilty(request["topic"], atom)
                 is_supported = npprob > 0.3
-                
-            if do_matching: 
+
+            if do_matching:
                 set_gen_words = set(word.lower() for word in gen_words)   # set = fast lookups, order untouched
                 # maybe switch to atom?
                 match_words = [w for w in word_tokenize(sent.lower()) if w in set_gen_words]
@@ -473,7 +579,9 @@ class FactScorer(object):
             decisions.append({"atom": atom,
                               # True / False, or None when the verdict was unparseable
                               "is_supported": is_supported,
-                              "retrieval_failed": retrieval_failed,
+                              # P(True) when the backend returned logprobs, else None
+                              "p_true": p_true,
+                              "retrieval_failed": request["retrieval_failed"],
                               "parse_failed": parse_failed,
                               "sentence" : sent,
                               "matched_words" : match_words,
@@ -481,11 +589,8 @@ class FactScorer(object):
                               "matched_token_indices" : token_indices,
                               "matched_word_token_indices" : word_token_indices})
 
-        if cost_estimate:
-            return total_words
-        else:
-            return decisions
-        
+        return decisions
+
     def _match_string(self, sentence, matched_words, generated_words, word_tokens, tokenizer_name): 
         
         #tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
