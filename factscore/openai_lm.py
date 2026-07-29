@@ -55,7 +55,8 @@ class OpenAIModel(LM):
 
     def __init__(self, model_name, cache_file=None, key_path="api.key", max_concurrency=None,
                  temp=0.0, reasoning_effort=None, use_batch_api=False,
-                 batch_poll_interval=30.0, batch_completion_window="24h"):
+                 batch_poll_interval=30.0, batch_completion_window="24h",
+                 openai_batch_size=5000, openai_max_active_batches=4):
         self.model_name = model_name
         self.key_path = key_path
         # a True/False verdict is a classification; sampling only adds noise and
@@ -68,6 +69,12 @@ class OpenAIModel(LM):
         self.use_batch_api = use_batch_api
         self.batch_poll_interval = batch_poll_interval
         self.batch_completion_window = batch_completion_window
+        if openai_batch_size <= 0:
+            raise ValueError("openai_batch_size must be positive")
+        if openai_max_active_batches <= 0:
+            raise ValueError("openai_max_active_batches must be positive")
+        self.openai_batch_size = int(openai_batch_size)
+        self.openai_max_active_batches = int(openai_max_active_batches)
         if max_concurrency is not None:
             self.max_concurrency = max_concurrency
         super().__init__(cache_file)
@@ -141,41 +148,104 @@ class OpenAIModel(LM):
 
         if uncached_by_key:
             keys = list(uncached_by_key)
+            batch_prompts = [uncached_by_key[key] for key in keys]
             batch_outputs = self._generate_openai_batch(
-                [uncached_by_key[key] for key in keys],
+                batch_prompts, sample_idx=sample_idx,
                 max_output_length=max_output_length,
                 response_format=response_format)
-            with self.cache_lock:
-                for key, output in zip(keys, batch_outputs):
-                    self.cache_dict[key] = output
-                    outputs_by_key[key] = output
-                    self.add_n += 1
-            self.save_cache()
+            for key, output in zip(keys, batch_outputs):
+                outputs_by_key[key] = output
 
         return [outputs_by_key[key_for(prompt)] for prompt in prompts]
 
-    def _generate_openai_batch(self, prompts, max_output_length=128, response_format=None):
-        route = resolve_route(self.model_name)
-        requests = []
-        for index, prompt in enumerate(prompts):
-            body = build_responses_kwargs(
-                prompt=prompt, model_name=route.api_model, temp=self.temp,
-                max_output_tokens=max_output_length, response_format=response_format,
-                is_reasoning=route.is_reasoning,
-                reasoning_effort=self.reasoning_effort or route.reasoning_effort)
-            requests.append({
-                "custom_id": f"request-{index}",
-                "method": "POST",
-                "url": "/v1/responses",
-                "body": body,
-            })
+    def _generate_openai_batch(self, prompts, sample_idx=0, max_output_length=128,
+                               response_format=None):
+        """Run uncached prompts through multiple bounded OpenAI Batch jobs.
 
+        Chunks are submitted up to ``openai_max_active_batches`` at a time. Each
+        completed chunk is written to the normal LM cache immediately, so a
+        restarted run only resubmits prompts from unfinished chunks.
+        """
+        if not prompts:
+            return []
+
+        chunks = [
+            (offset, prompts[offset:offset + self.openai_batch_size])
+            for offset in range(0, len(prompts), self.openai_batch_size)
+        ]
+        outputs = [None] * len(prompts)
+        pending = list(chunks)
+        active = {}
+
+        while pending or active:
+            while pending and len(active) < self.openai_max_active_batches:
+                offset, chunk_prompts = pending.pop(0)
+                job = self._submit_openai_batch_chunk(
+                    chunk_prompts, offset=offset,
+                    max_output_length=max_output_length,
+                    response_format=response_format)
+                active[job["batch_id"]] = job
+
+            completed_any = False
+            for batch_id, job in list(active.items()):
+                batch = call_with_retries(
+                    lambda batch_id=batch_id: self.client.batches.retrieve(batch_id),
+                    f"Batch API status for {batch_id}")
+                if batch.status not in {"completed", "failed", "expired", "cancelled"}:
+                    continue
+
+                completed_any = True
+                del active[batch_id]
+                if batch.status != "completed":
+                    raise RuntimeError(
+                        f"OpenAI batch {batch_id} ended with status {batch.status}")
+                chunk_outputs = self._download_openai_batch_chunk(batch, job)
+                offset = job["offset"]
+                outputs[offset:offset + len(chunk_outputs)] = chunk_outputs
+
+                # Checkpoint each completed chunk immediately. A restarted run
+                # therefore resubmits only prompts from unfinished/failed chunks.
+                with self.cache_lock:
+                    for prompt, output in zip(
+                            prompts[offset:offset + len(chunk_outputs)], chunk_outputs):
+                        key = f"{prompt.strip()}_{sample_idx}"
+                        if key not in self.cache_dict:
+                            self.add_n += 1
+                        self.cache_dict[key] = output
+                self.save_cache()
+
+                logging.info(
+                    "Completed OpenAI batch %s (%d requests; %d/%d outputs ready)",
+                    batch_id, len(chunk_outputs),
+                    sum(output is not None for output in outputs), len(outputs))
+
+            if active and not completed_any:
+                time.sleep(self.batch_poll_interval)
+
+        missing = [index for index, output in enumerate(outputs) if output is None]
+        if missing:
+            raise RuntimeError(f"Missing {len(missing)} Batch API outputs: {missing[:5]}")
+        return outputs
+
+    def _submit_openai_batch_chunk(self, prompts, offset, max_output_length, response_format):
+        route = resolve_route(self.model_name)
         path = None
         try:
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl",
-                                             encoding="utf-8", delete=False) as handle:
+            with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".jsonl", encoding="utf-8", delete=False) as handle:
                 path = handle.name
-                for request in requests:
+                for local_index, prompt in enumerate(prompts):
+                    body = build_responses_kwargs(
+                        prompt=prompt, model_name=route.api_model, temp=self.temp,
+                        max_output_tokens=max_output_length, response_format=response_format,
+                        is_reasoning=route.is_reasoning,
+                        reasoning_effort=self.reasoning_effort or route.reasoning_effort)
+                    request = {
+                        "custom_id": f"request-{offset + local_index}",
+                        "method": "POST",
+                        "url": "/v1/responses",
+                        "body": body,
+                    }
                     handle.write(json.dumps(request, ensure_ascii=False) + "\n")
 
             with open(path, "rb") as handle:
@@ -187,57 +257,63 @@ class OpenAIModel(LM):
                 lambda: self.client.batches.create(
                     input_file_id=input_file.id, endpoint="/v1/responses",
                     completion_window=self.batch_completion_window,
-                    metadata={"task": "factscore-verdicts"}),
+                    metadata={"task": "factscore-verdicts", "offset": str(offset)}),
                 "Batch API submission")
-            logging.info("Submitted OpenAI batch %s with %d requests", batch.id, len(prompts))
-
-            terminal = {"completed", "failed", "expired", "cancelled"}
-            while batch.status not in terminal:
-                time.sleep(self.batch_poll_interval)
-                batch = call_with_retries(
-                    lambda: self.client.batches.retrieve(batch.id),
-                    f"Batch API status for {batch.id}")
-
-            if batch.status != "completed":
-                raise RuntimeError(f"OpenAI batch {batch.id} ended with status {batch.status}")
-            if not batch.output_file_id:
-                raise RuntimeError(f"OpenAI batch {batch.id} completed without an output file")
-
-            content = call_with_retries(
-                lambda: self.client.files.content(batch.output_file_id),
-                f"Batch API output for {batch.id}")
-            raw_text = getattr(content, "text", None)
-            if raw_text is None:
-                raw = content.read() if hasattr(content, "read") else content.content
-                raw_text = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
-
-            results = {}
-            failures = []
-            for line in raw_text.splitlines():
-                if not line.strip():
-                    continue
-                item = json.loads(line)
-                custom_id = item.get("custom_id")
-                response = item.get("response")
-                if item.get("error") or not response or response.get("status_code") != 200:
-                    failures.append({"custom_id": custom_id, "error": item.get("error"),
-                                     "response": response})
-                    continue
-                results[custom_id] = response_body_to_generation(response["body"])
-
-            if failures:
-                raise RuntimeError(
-                    f"{len(failures)} request(s) failed in OpenAI batch {batch.id}: "
-                    f"{failures[:3]}")
-
-            missing = [f"request-{i}" for i in range(len(prompts))
-                       if f"request-{i}" not in results]
-            if missing:
-                raise RuntimeError(f"Missing {len(missing)} result(s) from batch {batch.id}: {missing[:5]}")
-            return [results[f"request-{i}"] for i in range(len(prompts))]
+            logging.info(
+                "Submitted OpenAI batch %s with %d requests (offset %d)",
+                batch.id, len(prompts), offset)
+            return {
+                "batch_id": batch.id,
+                "offset": offset,
+                "size": len(prompts),
+            }
         finally:
             if path and os.path.exists(path):
                 os.remove(path)
+
+    def _download_openai_batch_chunk(self, batch, job):
+        if not batch.output_file_id:
+            raise RuntimeError(f"OpenAI batch {batch.id} completed without an output file")
+
+        content = call_with_retries(
+            lambda: self.client.files.content(batch.output_file_id),
+            f"Batch API output for {batch.id}")
+        raw_text = getattr(content, "text", None)
+        if raw_text is None:
+            raw = content.read() if hasattr(content, "read") else content.content
+            raw_text = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+
+        results = {}
+        failures = []
+        for line in raw_text.splitlines():
+            if not line.strip():
+                continue
+            item = json.loads(line)
+            custom_id = item.get("custom_id")
+            response = item.get("response")
+            if item.get("error") or not response or response.get("status_code") != 200:
+                failures.append({
+                    "custom_id": custom_id,
+                    "error": item.get("error"),
+                    "response": response,
+                })
+                continue
+            results[custom_id] = response_body_to_generation(response["body"])
+
+        if failures:
+            raise RuntimeError(
+                f"{len(failures)} request(s) failed in OpenAI batch {batch.id}: "
+                f"{failures[:3]}")
+
+        expected_ids = [
+            f"request-{job['offset'] + local_index}"
+            for local_index in range(job["size"])
+        ]
+        missing = [custom_id for custom_id in expected_ids if custom_id not in results]
+        if missing:
+            raise RuntimeError(
+                f"Missing {len(missing)} result(s) from batch {batch.id}: {missing[:5]}")
+        return [results[custom_id] for custom_id in expected_ids]
 
 
 def should_retry(error):

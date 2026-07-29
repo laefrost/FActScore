@@ -149,7 +149,9 @@ class FactScorer(object):
                  max_workers=None,
                  reasoning_effort=None,
                  use_openai_batch_api=False,
-                 batch_poll_interval=30.0):
+                 batch_poll_interval=30.0,
+                 openai_batch_size=5000,
+                 openai_max_active_batches=4):
         assert model_name in ["retrieval+llama", "retrieval+llama+npm", "retrieval+ChatGPT", "npm", 
                               "retrieval+ChatGPT+npm", "ChatGPT", "gpt-oss", "retrieval+gpt-oss-20b", 
                               "hf-inf", "retrieval+hf-inf", "gpt-4o-mini", "gpt-5-mini", "gpt-5.6-luna",
@@ -180,7 +182,9 @@ class FactScorer(object):
                                   cache_file=os.path.join(cache_dir, "ChatGPT.pkl"),
                                   key_path=openai_key,
                                   use_batch_api=use_openai_batch_api,
-                                  batch_poll_interval=batch_poll_interval)
+                                  batch_poll_interval=batch_poll_interval,
+                                  openai_batch_size=openai_batch_size,
+                                  openai_max_active_batches=openai_max_active_batches)
         elif "oss" in model_name: 
             self.lm = Oss(model_name="gpt-oss-20b")
         elif "gpt" in model_name: 
@@ -188,7 +192,9 @@ class FactScorer(object):
                                   cache_file=os.path.join(cache_dir, "ChatGPT.pkl"),
                                   key_path=openai_key,
                                   use_batch_api=use_openai_batch_api,
-                                  batch_poll_interval=batch_poll_interval)
+                                  batch_poll_interval=batch_poll_interval,
+                                  openai_batch_size=openai_batch_size,
+                                  openai_max_active_batches=openai_max_active_batches)
             #self.backup_lm = OpenAIModel(model_name='')
         elif "hf" in model_name: 
             self.lm = HFInf(model_name="hf-inf", model_id="meta-llama/Llama-3.2-3B-Instruct", cache_file=os.path.join(cache_dir, "hf.pkl"))
@@ -200,7 +206,9 @@ class FactScorer(object):
                                   cache_file=os.path.join(cache_dir, "ChatGPT.pkl"),
                                   key_path=openai_key,
                                   use_batch_api=use_openai_batch_api,
-                                  batch_poll_interval=batch_poll_interval)
+                                  batch_poll_interval=batch_poll_interval,
+                                  openai_batch_size=openai_batch_size,
+                                  openai_max_active_batches=openai_max_active_batches)
 
         # verdict requests for different atoms are independent, so they are sent
         # concurrently; lower this if the API account's rate limit is tight
@@ -928,6 +936,14 @@ if __name__ == '__main__':
                         type=float,
                         default=30.0,
                         help='Seconds between OpenAI Batch API status checks')
+    parser.add_argument('--openai_batch_size',
+                        type=int,
+                        default=5000,
+                        help='Maximum requests per OpenAI Batch API job')
+    parser.add_argument('--openai_max_active_batches',
+                        type=int,
+                        default=4,
+                        help='Maximum OpenAI Batch API jobs active at once')
 
     args = parser.parse_args()
 
@@ -943,7 +959,9 @@ if __name__ == '__main__':
                     cost_estimate=args.cost_estimate,
                     abstain_detection_type=args.abstain_detection_type,
                     use_openai_batch_api=args.openai_batch_api,
-                    batch_poll_interval=args.batch_poll_interval)
+                    batch_poll_interval=args.batch_poll_interval,
+                    openai_batch_size=args.openai_batch_size,
+                    openai_max_active_batches=args.openai_max_active_batches)
 
     tot = 0
     topics, generations, atomic_facts = [], [], []
