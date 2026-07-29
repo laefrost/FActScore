@@ -6,8 +6,6 @@ import time
 import os
 import numpy as np
 import logging
-import json
-import tempfile
 
 from collections import namedtuple
 from factscore.lm import LM
@@ -54,8 +52,7 @@ class OpenAIModel(LM):
     max_concurrency = 8
 
     def __init__(self, model_name, cache_file=None, key_path="api.key", max_concurrency=None,
-                 temp=0.0, reasoning_effort=None, use_batch_api=False,
-                 batch_poll_interval=30.0, batch_completion_window="24h"):
+                 temp=0.0, reasoning_effort=None):
         self.model_name = model_name
         self.key_path = key_path
         # a True/False verdict is a classification; sampling only adds noise and
@@ -65,9 +62,6 @@ class OpenAIModel(LM):
         self.reasoning_effort = reasoning_effort
         self.save_interval = 100
         self.client = None
-        self.use_batch_api = use_batch_api
-        self.batch_poll_interval = batch_poll_interval
-        self.batch_completion_window = batch_completion_window
         if max_concurrency is not None:
             self.max_concurrency = max_concurrency
         super().__init__(cache_file)
@@ -103,141 +97,6 @@ class OpenAIModel(LM):
             reasoning_effort=self.reasoning_effort or route.reasoning_effort,
         )
         return response["output_text"], response
-
-    def generate_batch(self, prompts, sample_idx=0, max_sequence_length=2048,
-                       max_output_length=128, response_format=None, max_workers=None):
-        """Generate prompts concurrently or through the OpenAI Batch API.
-
-        The Batch API path is synchronous from the caller's perspective: it
-        uploads one JSONL file, waits for the batch to finish, downloads the
-        result file, updates the normal LM cache, and returns outputs in the
-        same order as ``prompts``.
-        """
-        if not self.use_batch_api:
-            return super().generate_batch(
-                prompts, sample_idx=sample_idx,
-                max_sequence_length=max_sequence_length,
-                max_output_length=max_output_length,
-                response_format=response_format, max_workers=max_workers)
-
-        if self.model_name == "InstructGPT":
-            raise NotImplementedError("Batch API mode is implemented for /v1/responses only.")
-
-        if self.model is None:
-            self.load_model()
-
-        def key_for(prompt):
-            return f"{prompt.strip()}_{sample_idx}"
-
-        outputs_by_key = {}
-        uncached_by_key = {}
-        with self.cache_lock:
-            for prompt in prompts:
-                key = key_for(prompt)
-                if key in self.cache_dict:
-                    outputs_by_key[key] = self.cache_dict[key]
-                elif key not in uncached_by_key:
-                    uncached_by_key[key] = prompt.strip()
-
-        if uncached_by_key:
-            keys = list(uncached_by_key)
-            batch_outputs = self._generate_openai_batch(
-                [uncached_by_key[key] for key in keys],
-                max_output_length=max_output_length,
-                response_format=response_format)
-            with self.cache_lock:
-                for key, output in zip(keys, batch_outputs):
-                    self.cache_dict[key] = output
-                    outputs_by_key[key] = output
-                    self.add_n += 1
-            self.save_cache()
-
-        return [outputs_by_key[key_for(prompt)] for prompt in prompts]
-
-    def _generate_openai_batch(self, prompts, max_output_length=128, response_format=None):
-        route = resolve_route(self.model_name)
-        requests = []
-        for index, prompt in enumerate(prompts):
-            body = build_responses_kwargs(
-                prompt=prompt, model_name=route.api_model, temp=self.temp,
-                max_output_tokens=max_output_length, response_format=response_format,
-                is_reasoning=route.is_reasoning,
-                reasoning_effort=self.reasoning_effort or route.reasoning_effort)
-            requests.append({
-                "custom_id": f"request-{index}",
-                "method": "POST",
-                "url": "/v1/responses",
-                "body": body,
-            })
-
-        path = None
-        try:
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl",
-                                             encoding="utf-8", delete=False) as handle:
-                path = handle.name
-                for request in requests:
-                    handle.write(json.dumps(request, ensure_ascii=False) + "\n")
-
-            with open(path, "rb") as handle:
-                input_file = call_with_retries(
-                    lambda: self.client.files.create(file=handle, purpose="batch"),
-                    "Batch API input upload")
-
-            batch = call_with_retries(
-                lambda: self.client.batches.create(
-                    input_file_id=input_file.id, endpoint="/v1/responses",
-                    completion_window=self.batch_completion_window,
-                    metadata={"task": "factscore-verdicts"}),
-                "Batch API submission")
-            logging.info("Submitted OpenAI batch %s with %d requests", batch.id, len(prompts))
-
-            terminal = {"completed", "failed", "expired", "cancelled"}
-            while batch.status not in terminal:
-                time.sleep(self.batch_poll_interval)
-                batch = call_with_retries(
-                    lambda: self.client.batches.retrieve(batch.id),
-                    f"Batch API status for {batch.id}")
-
-            if batch.status != "completed":
-                raise RuntimeError(f"OpenAI batch {batch.id} ended with status {batch.status}")
-            if not batch.output_file_id:
-                raise RuntimeError(f"OpenAI batch {batch.id} completed without an output file")
-
-            content = call_with_retries(
-                lambda: self.client.files.content(batch.output_file_id),
-                f"Batch API output for {batch.id}")
-            raw_text = getattr(content, "text", None)
-            if raw_text is None:
-                raw = content.read() if hasattr(content, "read") else content.content
-                raw_text = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
-
-            results = {}
-            failures = []
-            for line in raw_text.splitlines():
-                if not line.strip():
-                    continue
-                item = json.loads(line)
-                custom_id = item.get("custom_id")
-                response = item.get("response")
-                if item.get("error") or not response or response.get("status_code") != 200:
-                    failures.append({"custom_id": custom_id, "error": item.get("error"),
-                                     "response": response})
-                    continue
-                results[custom_id] = response_body_to_generation(response["body"])
-
-            if failures:
-                raise RuntimeError(
-                    f"{len(failures)} request(s) failed in OpenAI batch {batch.id}: "
-                    f"{failures[:3]}")
-
-            missing = [f"request-{i}" for i in range(len(prompts))
-                       if f"request-{i}" not in results]
-            if missing:
-                raise RuntimeError(f"Missing {len(missing)} result(s) from batch {batch.id}: {missing[:5]}")
-            return [results[f"request-{i}"] for i in range(len(prompts))]
-        finally:
-            if path and os.path.exists(path):
-                os.remove(path)
 
 
 def should_retry(error):
@@ -301,59 +160,6 @@ def verdict_probability(response):
     return None
 
 
-
-def build_responses_kwargs(prompt, model_name, max_output_tokens=512, temp=0.0,
-                            response_format=None, is_reasoning=False,
-                            reasoning_effort="none", top_logprobs=5):
-    """Build a /v1/responses request body usable online or in Batch JSONL."""
-    kwargs = {
-        "model": model_name,
-        "input": [{"role": "user", "content": prompt}],
-    }
-    if response_format is not None:
-        kwargs["text"] = {"format": response_format}
-    if is_reasoning:
-        if reasoning_effort is not None:
-            kwargs["reasoning"] = {"effort": reasoning_effort}
-    else:
-        kwargs["temperature"] = temp
-        kwargs["max_output_tokens"] = max_output_tokens
-        if top_logprobs:
-            kwargs["top_logprobs"] = top_logprobs
-    return kwargs
-
-
-def response_body_to_generation(body):
-    """Convert a Batch /v1/responses body to LM's (text, metadata) contract."""
-    text_parts = []
-    p_true = None
-    for item in body.get("output", []) or []:
-        for content in item.get("content", []) or []:
-            if content.get("type") == "output_text" and content.get("text") is not None:
-                text_parts.append(content["text"])
-            if p_true is None:
-                p_true = verdict_probability_dict(content.get("logprobs") or [])
-    output_text = "".join(text_parts)
-    return output_text, {"raw_response": body, "output_text": output_text, "p_true": p_true}
-
-
-def verdict_probability_dict(entries):
-    """Dictionary equivalent of verdict_probability() for Batch output JSON."""
-    for entry in entries:
-        if verdict_word(entry.get("token")) is None:
-            continue
-        mass = {"true": 0.0, "false": 0.0}
-        alternatives = entry.get("top_logprobs") or [entry]
-        for alternative in alternatives:
-            word = verdict_word(alternative.get("token"))
-            logprob = alternative.get("logprob")
-            if word is not None and logprob is not None:
-                mass[word] += math.exp(logprob)
-        total = mass["true"] + mass["false"]
-        if total > 0:
-            return mass["true"] / total
-    return None
-
 def call_chat_model(
     client,
     prompt,
@@ -365,10 +171,27 @@ def call_chat_model(
     reasoning_effort = "none",
     top_logprobs = 5,
 ):
-    kwargs = build_responses_kwargs(
-        prompt=prompt, model_name=model_name, max_output_tokens=max_output_tokens,
-        temp=temp, response_format=response_format, is_reasoning=is_reasoning,
-        reasoning_effort=reasoning_effort, top_logprobs=top_logprobs)
+    kwargs = {
+        "model": model_name,
+        "input": [  # Correct parameter name
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+    }
+    if response_format is not None:
+        kwargs["text"] = {"format": response_format}
+    if is_reasoning:
+        if reasoning_effort is not None:
+            kwargs["reasoning"] = {"effort": reasoning_effort}
+    else:
+        # a reasoning model rejects both of these, and a token cap can leave it
+        # returning an empty output_text after spending the budget on reasoning
+        kwargs["temperature"] = temp
+        kwargs["max_output_tokens"] = max_output_tokens
+        if top_logprobs:
+            kwargs["top_logprobs"] = top_logprobs
 
     response = call_with_retries(lambda: client.responses.create(**kwargs),
                                  f"{model_name} verdict")

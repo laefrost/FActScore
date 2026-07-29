@@ -147,9 +147,7 @@ class FactScorer(object):
                  abstain_detection_type=None,
                  batch_size=256,
                  max_workers=None,
-                 reasoning_effort=None,
-                 use_openai_batch_api=False,
-                 batch_poll_interval=30.0):
+                 reasoning_effort=None):
         assert model_name in ["retrieval+llama", "retrieval+llama+npm", "retrieval+ChatGPT", "npm", 
                               "retrieval+ChatGPT+npm", "ChatGPT", "gpt-oss", "retrieval+gpt-oss-20b", 
                               "hf-inf", "retrieval+hf-inf", "gpt-4o-mini", "gpt-5-mini", "gpt-5.6-luna",
@@ -178,17 +176,13 @@ class FactScorer(object):
         elif "ChatGPT" in model_name:
             self.lm = OpenAIModel("ChatGPT",
                                   cache_file=os.path.join(cache_dir, "ChatGPT.pkl"),
-                                  key_path=openai_key,
-                                  use_batch_api=use_openai_batch_api,
-                                  batch_poll_interval=batch_poll_interval)
+                                  key_path=openai_key)
         elif "oss" in model_name: 
             self.lm = Oss(model_name="gpt-oss-20b")
         elif "gpt" in model_name: 
             self.lm = OpenAIModel(model_name=model_name,
                                   cache_file=os.path.join(cache_dir, "ChatGPT.pkl"),
-                                  key_path=openai_key,
-                                  use_batch_api=use_openai_batch_api,
-                                  batch_poll_interval=batch_poll_interval)
+                                  key_path=openai_key)
             #self.backup_lm = OpenAIModel(model_name='')
         elif "hf" in model_name: 
             self.lm = HFInf(model_name="hf-inf", model_id="meta-llama/Llama-3.2-3B-Instruct", cache_file=os.path.join(cache_dir, "hf.pkl"))
@@ -198,9 +192,7 @@ class FactScorer(object):
         # non-reasoning, so verdicts come back with logprobs attached
         self.backup_lm = OpenAIModel(model_name='gpt-4o-mini',
                                   cache_file=os.path.join(cache_dir, "ChatGPT.pkl"),
-                                  key_path=openai_key,
-                                  use_batch_api=use_openai_batch_api,
-                                  batch_poll_interval=batch_poll_interval)
+                                  key_path=openai_key)
 
         # verdict requests for different atoms are independent, so they are sent
         # concurrently; lower this if the API account's rate limit is tight
@@ -921,13 +913,6 @@ if __name__ == '__main__':
     parser.add_argument('--n_samples',
                         type=int,
                         default=None)
-    parser.add_argument('--openai_batch_api',
-                        action='store_true',
-                        help='Submit OpenAI verdict requests through the asynchronous Batch API')
-    parser.add_argument('--batch_poll_interval',
-                        type=float,
-                        default=30.0,
-                        help='Seconds between OpenAI Batch API status checks')
 
     args = parser.parse_args()
 
@@ -941,9 +926,7 @@ if __name__ == '__main__':
                     cache_dir=args.cache_dir,
                     openai_key=args.openai_key,
                     cost_estimate=args.cost_estimate,
-                    abstain_detection_type=args.abstain_detection_type,
-                    use_openai_batch_api=args.openai_batch_api,
-                    batch_poll_interval=args.batch_poll_interval)
+                    abstain_detection_type=args.abstain_detection_type)
 
     tot = 0
     topics, generations, atomic_facts = [], [], []
