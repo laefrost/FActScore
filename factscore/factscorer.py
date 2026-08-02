@@ -47,6 +47,11 @@ VERDICT_RESPONSE_FORMAT = {
 
 # Surface forms of the verdict tokens, most vocabulary-specific first:
 # "▁True" is SentencePiece (LLaMA-1/2), "ĠTrue" is byte-level BPE (GPT-2/o200k).
+# How each atomic fact is checked once the atoms have been extracted. The atom
+# extraction, and everything after the check (matching, scoring), is shared.
+FACT_CHECKERS = ("factscore", "safe")
+
+
 _TRUE_SURFACES = ("▁True", "ĠTrue", " True", "True")
 _FALSE_SURFACES = ("▁False", "ĠFalse", " False", "False")
 
@@ -151,12 +156,20 @@ class FactScorer(object):
                  use_openai_batch_api=False,
                  batch_poll_interval=30.0,
                  openai_batch_size=5000,
-                 openai_max_active_batches=4):
-        assert model_name in ["retrieval+llama", "retrieval+llama+npm", "retrieval+ChatGPT", "npm", 
-                              "retrieval+ChatGPT+npm", "ChatGPT", "gpt-oss", "retrieval+gpt-oss-20b", 
+                 openai_max_active_batches=4,
+                 fact_checker="factscore"):
+        assert model_name in ["retrieval+llama", "retrieval+llama+npm", "retrieval+ChatGPT", "npm",
+                              "retrieval+ChatGPT+npm", "ChatGPT", "gpt-oss", "retrieval+gpt-oss-20b",
                               "hf-inf", "retrieval+hf-inf", "gpt-4o-mini", "gpt-5-mini", "gpt-5.6-luna",
                               "retrieval+gpt-4o-mini", "retrieval+gpt-5-mini", "retrieval+gpt-5.6-luna"]
+        assert fact_checker in FACT_CHECKERS, \
+            f"`fact_checker` should be one of {FACT_CHECKERS}, got {fact_checker!r}"
         self.model_name = model_name
+        # "factscore": retrieve passages, then ask for a True/False verdict.
+        # "safe": run eval/safe - revise each atom, drop the ones irrelevant to
+        # the prompt, and ground the rest in Google Search.
+        self.fact_checker = fact_checker
+        self.safe_checker = None
 
         self.db = {}
         self.retrieval = {}
@@ -224,6 +237,20 @@ class FactScorer(object):
                 if isinstance(lm, OpenAIModel):
                     lm.reasoning_effort = reasoning_effort
 
+    def _get_safe_checker(self):
+        """The SAFE checker, built on first use.
+
+        Imported lazily so that a factscore-checker run needs neither the
+        eval/safe package nor a search backend.
+        """
+        if self.safe_checker is None:
+            from factscore.safe_checker import SafeChecker
+            if self.lm is None:
+                raise ValueError("The SAFE fact checker needs an LM; `model_name`=%r has none."
+                                 % self.model_name)
+            self.safe_checker = SafeChecker(self.lm)
+        return self.safe_checker
+
     def save_cache(self):
         if self.lm:
             self.lm.save_cache()
@@ -286,14 +313,19 @@ class FactScorer(object):
                   word_tokens = None, 
                   tokenizer_name = None):
         
-        if knowledge_source is None:
-            # use the default knowledge source
-            knowledge_source = "enwiki-20230401"
-
-        if knowledge_source not in  self.retrieval and self.model_name not in ["ChatGPT", "gpt-oss-20b", "hf-inf", "gpt-4o-mini", "gpt-5-mini"]:
-            self.register_knowledge_source(knowledge_source)
-        else:
+        if self.fact_checker == "safe":
+            # SAFE grounds every atom in Google Search, so nothing is retrieved
+            # from a local knowledge source
             knowledge_source = None
+        else:
+            if knowledge_source is None:
+                # use the default knowledge source
+                knowledge_source = "enwiki-20230401"
+
+            if knowledge_source not in  self.retrieval and self.model_name not in ["ChatGPT", "gpt-oss-20b", "hf-inf", "gpt-4o-mini", "gpt-5-mini"]:
+                self.register_knowledge_source(knowledge_source)
+            else:
+                knowledge_source = None
 
         if type(topics)==type(generations)==str:
             topics = [topics]
@@ -412,6 +444,9 @@ class FactScorer(object):
                 num_unparsed = len(decision) - len(verdicts)
                 score = np.mean(verdicts) if verdicts else np.nan
                 sents = [d["sentence"] for d in decision]
+                # SAFE drops the atoms it judged irrelevant, so the checked
+                # atoms are read back off the decisions instead of `facts`
+                checked_facts = [d["atom"] for d in decision] if self.fact_checker == "safe" else facts
                 # if gamma:
                 #     init_scores.append(score)
                 #     penalty = 1.0 if len(facts)>gamma else np.exp(1-gamma/len(facts))
@@ -419,7 +454,7 @@ class FactScorer(object):
 
                 decisions.append(decision)
                 scores.append(score)
-                score_list.append({"facts" : facts, "sentence" : sents, "score" : score, "generation" : generation, "topic" : topic, "num_unparsed" : num_unparsed})
+                score_list.append({"facts" : checked_facts, "sentence" : sents, "score" : score, "generation" : generation, "topic" : topic, "num_unparsed" : num_unparsed})
                 if len(scores) % 10 == 0:
                     self.save_cache()
         self.save_cache()
@@ -468,6 +503,26 @@ class FactScorer(object):
         total_words = 0
         for atom, sent in zip(atomic_facts, sentences):
             atom = atom.strip()
+
+            if self.fact_checker == "safe":
+                # SAFE renders its own chain of prompts per atom, so there is
+                # nothing to build and nothing to retrieve here; the work
+                # happens in _run_safe_requests.
+                requests.append({"topic": topic,
+                                 "atom": atom,
+                                 "sentence": sent,
+                                 "prompt": None,
+                                 "lm": self.lm,
+                                 "retrieval_failed": False,
+                                 "output": None,
+                                 # what SAFE checks the atom against: the
+                                 # question asked, falling back to the topic
+                                 "safe_prompt": question if question is not None else topic,
+                                 "generation": generation,
+                                 # filled in by _run_safe_requests
+                                 "safe": None})
+                continue
+
             retrieval_failed = False
             prompt = None
             lm_used = None
@@ -529,6 +584,10 @@ class FactScorer(object):
 
     def _run_score_requests(self, requests):
         """Answer every pending prompt, one concurrent pool per backend."""
+        if self.fact_checker == "safe":
+            self._run_safe_requests(requests)
+            return
+
         by_backend = defaultdict(list)
         for request in requests:
             if request["prompt"] is not None:
@@ -541,6 +600,17 @@ class FactScorer(object):
             for request, output in zip(grouped, outputs):
                 request["output"] = output
 
+    def _run_safe_requests(self, requests):
+        """Run the SAFE pipeline for every atom, pooled across all of them."""
+        if not requests:
+            return
+
+        checker = self._get_safe_checker()
+        results = checker.check_atoms([(request["safe_prompt"], request["generation"], request["atom"])
+                                       for request in requests])
+        for request, result in zip(requests, results):
+            request["safe"] = result
+
     def _finalize_decisions(self, requests, knowledge_source = None, do_matching = False, gen_words = None, word_tokens = None, tokenizer_name = None):
         """Turn answered requests into decision records. Local work only."""
         decisions = []
@@ -550,8 +620,21 @@ class FactScorer(object):
             output = request["output"]
             parse_failed = False
             p_true = None
+            safe_result = None
 
-            if output is None:
+            if self.fact_checker == "safe":
+                safe_result = request["safe"]
+                if safe_result is None:
+                    # SAFE gave up on this atom after its retries
+                    is_supported = None
+                    parse_failed = True
+                elif not safe_result["is_relevant"]:
+                    # not relevant to the prompt: SAFE never rates it, and it is
+                    # dropped here rather than counted either way
+                    continue
+                else:
+                    is_supported = safe_result["is_supported"]
+            elif output is None:
                 # no lm configured for this run
                 is_supported = True
             else:
@@ -592,18 +675,27 @@ class FactScorer(object):
                 token_indices = None
                 word_token_indices = None
 
-            decisions.append({"atom": atom,
-                              # True / False, or None when the verdict was unparseable
-                              "is_supported": is_supported,
-                              # P(True) when the backend returned logprobs, else None
-                              "p_true": p_true,
-                              "retrieval_failed": request["retrieval_failed"],
-                              "parse_failed": parse_failed,
-                              "sentence" : sent,
-                              "matched_words" : match_words,
-                              "matched_word_indices" : matched_word_indices,
-                              "matched_token_indices" : token_indices,
-                              "matched_word_token_indices" : word_token_indices})
+            decision = {"atom": atom,
+                        # True / False, or None when the verdict was unparseable
+                        "is_supported": is_supported,
+                        # P(True) when the backend returned logprobs, else None
+                        "p_true": p_true,
+                        "retrieval_failed": request["retrieval_failed"],
+                        "parse_failed": parse_failed,
+                        "sentence" : sent,
+                        "matched_words" : match_words,
+                        "matched_word_indices" : matched_word_indices,
+                        "matched_token_indices" : token_indices,
+                        "matched_word_token_indices" : word_token_indices}
+
+            if self.fact_checker == "safe":
+                # Supported / Not Supported, the self-contained rewrite of the
+                # atom, and the searches SAFE ran to get there
+                decision["annotation"] = safe_result["annotation"] if safe_result else None
+                decision["self_contained_atom"] = safe_result["self_contained_atom"] if safe_result else None
+                decision["safe_data"] = safe_result
+
+            decisions.append(decision)
 
         return decisions
 
@@ -944,6 +1036,12 @@ if __name__ == '__main__':
                         type=int,
                         default=4,
                         help='Maximum OpenAI Batch API jobs active at once')
+    parser.add_argument('--fact_checker',
+                        type=str,
+                        default="factscore",
+                        choices=list(FACT_CHECKERS),
+                        help='How each atomic fact is checked: factscore (retrieval + True/False '
+                             'verdict) or safe (eval/safe: relevance filter + Google Search)')
 
     args = parser.parse_args()
 
@@ -961,7 +1059,8 @@ if __name__ == '__main__':
                     use_openai_batch_api=args.openai_batch_api,
                     batch_poll_interval=args.batch_poll_interval,
                     openai_batch_size=args.openai_batch_size,
-                    openai_max_active_batches=args.openai_max_active_batches)
+                    openai_max_active_batches=args.openai_max_active_batches,
+                    fact_checker=args.fact_checker)
 
     tot = 0
     topics, generations, atomic_facts = [], [], []
