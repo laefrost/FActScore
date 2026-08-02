@@ -28,16 +28,36 @@ IRRELEVANT_LABEL = 'Irrelevant'
 MAX_PIPELINE_RETRIES = 3
 
 
-def _import_safe():
-    """The SAFE modules, adding the repo root to sys.path if it isn't there."""
-    try:
-        from eval.safe import classify_relevance, config, rate_atomic_fact
-    except ImportError:
-        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        if repo_root not in sys.path:
-            sys.path.insert(0, repo_root)
-        from eval.safe import classify_relevance, config, rate_atomic_fact
+def _do_import_safe():
+    from eval.safe import classify_relevance, config, rate_atomic_fact
     return classify_relevance, rate_atomic_fact, config
+
+
+def _import_safe():
+    """The SAFE modules, adding factscore's parent directory to sys.path if needed.
+
+    That covers running straight out of the repository; an installed factscore
+    gets `eval` and `common` from site-packages, since pyproject.toml ships them
+    next to `factscore`.
+    """
+    try:
+        return _do_import_safe()
+    except ImportError:
+        pass
+
+    parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if parent_dir not in sys.path:
+        sys.path.insert(0, parent_dir)
+
+    try:
+        return _do_import_safe()
+    except ImportError as e:
+        raise ModuleNotFoundError(
+            "fact_checker='safe' needs the `eval` and `common` packages that ship with "
+            "FActScore, and they are not importable from {!r}. Either reinstall factscore "
+            "from the repository (pip install --force-reinstall --no-deps <path-to-FActScore>) "
+            "or put the repository root on PYTHONPATH. The same error appears if another "
+            "top-level `common` package shadows FActScore's.".format(parent_dir)) from e
 
 
 class SafeChecker:

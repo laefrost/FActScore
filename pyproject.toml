@@ -5,6 +5,14 @@ description = "FactScore is an automatic evaluation metric for factual precision
 authors = ["Sewon Min <sewon@cs.washington.edu>", "Kalpesh Krishna <kalpesh@cs.umass.edu>", "Xinxi Lyu <alrope@cs.washington.edu>"]
 license = "MIT"
 readme = "README.md"
+# `eval` holds the SAFE fact checker and `common` the support package its files
+# import; both have to be installed alongside `factscore`, or fact_checker="safe"
+# only works when running from the repository root.
+packages = [
+    { include = "factscore" },
+    { include = "eval" },
+    { include = "common" },
+]
 
 [tool.poetry.dependencies]
 python = "^3.7.1"
