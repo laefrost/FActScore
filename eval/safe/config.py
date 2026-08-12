@@ -53,7 +53,7 @@ num_searches = 3
 # debug_safe: bool = show debugging printouts when running SAFE.
 ################################################################################
 max_steps = 5
-max_retries = 10
+max_retries = 1 #10
 debug_safe = False
 
 ################################################################################
