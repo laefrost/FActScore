@@ -121,7 +121,9 @@ class RateAtomicFactTest(absltest.TestCase):
         debug=False,
     )
     mock_strip_string.assert_called_once()
-    mock_generate.assert_called_once_with(_TEST_MODEL_INPUT, do_debug=False)
+    mock_generate.assert_called_once_with(
+        _TEST_MODEL_INPUT, do_debug=False, sample_idx=0
+    )
     mock_extract_first_code_block.assert_called_once_with(
         _TEST_MODEL_RESPONSE, ignore_language=True
     )
@@ -150,7 +152,9 @@ class RateAtomicFactTest(absltest.TestCase):
         debug=False,
     )
     mock_strip_string.assert_called_once()
-    mock_generate.assert_called_once_with(_TEST_MODEL_INPUT, do_debug=False)
+    mock_generate.assert_called_once_with(
+        _TEST_MODEL_INPUT, do_debug=False, sample_idx=0
+    )
     mock_extract_first_code_block.assert_called_once_with(
         _TEST_MODEL_RESPONSE, ignore_language=True
     )
@@ -181,7 +185,9 @@ class RateAtomicFactTest(absltest.TestCase):
         debug=False,
     )
     mock_strip_string.assert_called_once()
-    mock_generate.assert_called_once_with(_TEST_MODEL_INPUT, do_debug=False)
+    mock_generate.assert_called_once_with(
+        _TEST_MODEL_INPUT, do_debug=False, sample_idx=0
+    )
     mock_extract_first_square_brackets.assert_called_once_with(
         _TEST_MODEL_RESPONSE
     )
@@ -213,7 +219,9 @@ class RateAtomicFactTest(absltest.TestCase):
         debug=False,
     )
     mock_strip_string.assert_called_once()
-    mock_generate.assert_called_once_with(_TEST_MODEL_INPUT, do_debug=False)
+    mock_generate.assert_called_once_with(
+        _TEST_MODEL_INPUT, do_debug=False, sample_idx=0
+    )
     mock_extract_first_square_brackets.assert_called_once_with(
         _TEST_MODEL_RESPONSE
     )

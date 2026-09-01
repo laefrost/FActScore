@@ -135,6 +135,13 @@ class SafeChecker:
 
         return None
 
+    def _save_search_cache(self):
+        """Flush SAFE's Serper response cache, so a crash cannot lose paid queries."""
+        save = getattr(self._rate_atomic_fact.query_serper, 'save_cache', None)
+
+        if save is not None:
+            save()
+
     def check_atoms(self, items):
         """Check many (prompt, response, atom) triples, one result per item, in order."""
         items = list(items)
@@ -147,7 +154,9 @@ class SafeChecker:
 
         workers = min(self.max_workers, len(items))
         if workers <= 1:
-            return [run(item) for item in items]
+            results = [run(item) for item in items]
+            self._save_search_cache()
+            return results
 
         # one cache flush at the end instead of one per worker crossing the
         # backend's save interval
@@ -164,4 +173,5 @@ class SafeChecker:
         if hasattr(lm, 'save_cache'):
             lm.save_cache()
 
+        self._save_search_cache()
         return results

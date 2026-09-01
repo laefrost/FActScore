@@ -48,10 +48,17 @@ class Model:
         if temperature is not None and hasattr(self.lm, 'temp'):
             self.lm.temp = temperature
 
-    def generate(self, prompt, do_debug=False, max_tokens=None, **kwargs):
-        """One completion, as a plain string ('' when the backend returns nothing)."""
+    def generate(self, prompt, do_debug=False, max_tokens=None, sample_idx=0, **kwargs):
+        """One completion, as a plain string ('' when the backend returns nothing).
+
+        `sample_idx` is forwarded to the factscore cache key, so a caller
+        retrying an unparseable response gets a genuine second completion rather
+        than a replay of the cached first one.
+        """
         del kwargs  # SAFE passes nothing else; accepted so callers stay unchanged
-        response = self.lm.generate(prompt, max_output_length=max_tokens or self.max_tokens)
+        response = self.lm.generate(prompt,
+                                    sample_idx=sample_idx,
+                                    max_output_length=max_tokens or self.max_tokens)
 
         # factscore LMs return (text, metadata); tolerate bare-string backends
         text = response[0] if isinstance(response, tuple) else response

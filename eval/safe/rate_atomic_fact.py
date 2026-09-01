@@ -106,6 +106,7 @@ def maybe_get_next_search(
     past_searches: list[GoogleSearchResult],
     model: modeling.Model,
     debug: bool = safe_config.debug_safe,
+    sample_idx: int = 0,
 ) -> GoogleSearchResult | None:
   """Get the next query from the model."""
   knowledge = '\n'.join([s.result for s in past_searches])
@@ -113,7 +114,9 @@ def maybe_get_next_search(
   full_prompt = _NEXT_SEARCH_FORMAT.replace(_STATEMENT_PLACEHOLDER, atomic_fact)
   full_prompt = full_prompt.replace(_KNOWLEDGE_PLACEHOLDER, knowledge)
   full_prompt = utils.strip_string(full_prompt)
-  model_response = model.generate(full_prompt, do_debug=debug)
+  model_response = model.generate(
+      full_prompt, do_debug=debug, sample_idx=sample_idx
+  )
   query = utils.extract_first_code_block(model_response, ignore_language=True)
 
   if model_response and query:
@@ -127,15 +130,27 @@ def maybe_get_final_answer(
     searches: list[GoogleSearchResult],
     model: modeling.Model,
     debug: bool = safe_config.debug_safe,
+    sample_idx: int = 0,
 ) -> FinalAnswer | None:
   """Get the final answer from the model."""
+  if not searches:
+    # No evidence was retrieved, so there is nothing to judge the statement
+    # against. Answering anyway means handing the model an empty KNOWLEDGE
+    # block, which it reliably resolves as `Not Supported` - scoring a pipeline
+    # failure as a factual error. Returning None instead sends the atom down
+    # factscore's `parse_failed` path, where it is excluded from the score and
+    # counted in `num_unparsed`.
+    return None
+
   knowledge = '\n'.join([search.result for search in searches])
   full_prompt = _FINAL_ANSWER_FORMAT.replace(
       _STATEMENT_PLACEHOLDER, atomic_fact
   )
   full_prompt = full_prompt.replace(_KNOWLEDGE_PLACEHOLDER, knowledge)
   full_prompt = utils.strip_string(full_prompt)
-  model_response = model.generate(full_prompt, do_debug=debug)
+  model_response = model.generate(
+      full_prompt, do_debug=debug, sample_idx=sample_idx
+  )
   answer = utils.extract_first_square_brackets(model_response)
   answer = re.sub(r'[^\w\s]', '', answer).strip()
 
@@ -159,7 +174,12 @@ def check_atomic_fact(
     next_search, num_tries = None, 0
 
     while not next_search and num_tries <= max_retries:
-      next_search = maybe_get_next_search(atomic_fact, search_results, rater)
+      # `sample_idx` varies the backend's cache key, so a retry is a real second
+      # call. Without it the identical prompt just replays the cached first
+      # answer, and a parse failure can never recover.
+      next_search = maybe_get_next_search(
+          atomic_fact, search_results, rater, debug=debug, sample_idx=num_tries
+      )
       num_tries += 1
 
     if next_search is None:
@@ -174,10 +194,11 @@ def check_atomic_fact(
   final_answer, num_tries = None, 0
 
   while not final_answer and num_tries <= max_retries:
-    num_tries += 1
     final_answer = maybe_get_final_answer(
-        atomic_fact, searches=search_results, model=rater, debug=debug
+        atomic_fact, searches=search_results, model=rater, debug=debug,
+        sample_idx=num_tries,
     )
+    num_tries += 1
 
   if final_answer is None:
     utils.maybe_print_error('Unsuccessful parsing for `final_answer`')

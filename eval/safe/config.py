@@ -42,17 +42,28 @@ max_tokens = 512
 #                              SEARCH SETTINGS
 # search_type: str = Google Search API used. Choose from ['serper'].
 # num_searches: int = Number of results to show per search.
+#
+# Serper bills per request, not per result: 1 credit buys up to 10 results, and
+# 11-100 results cost 2. So 10 is the widest free setting, and anything above it
+# doubles the price of every query - if more evidence is wanted, raise
+# `max_steps` (distinct queries) rather than pushing this past 10.
 ################################################################################
 search_type = 'serper'
-num_searches = 3
+num_searches = 10
 
 ################################################################################
 #                               SAFE SETTINGS
 # max_steps: int = maximum number of break-down steps for factuality check.
 # max_retries: int = maximum number of retries when fact checking fails.
 # debug_safe: bool = show debugging printouts when running SAFE.
+#
+# `max_steps` is the exact number of searches per relevant atom, not a cap - the
+# loop in rate_atomic_fact.check_atomic_fact has no early exit - so it is also
+# exactly the number of Serper credits each relevant atom costs. It is the
+# dominant cost knob, and superlinear on the model side too, since every step
+# re-sends all previous results as KNOWLEDGE.
 ################################################################################
-max_steps = 5
+max_steps = 1
 max_retries = 1 #10
 debug_safe = False
 

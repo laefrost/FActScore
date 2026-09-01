@@ -20,6 +20,7 @@ python -m eval.safe.query_serper_test
 """
 
 import copy
+import os
 from unittest import mock
 
 from absl.testing import absltest
@@ -121,6 +122,14 @@ _TEST_SERPER_API = query_serper.SerperAPI(
 
 
 class QuerySerperTest(absltest.TestCase):
+
+  def setUp(self) -> None:
+    super().setUp()
+    # these tests assert on the request itself, so the on-disk response cache
+    # must not be allowed to serve the query instead
+    patcher = mock.patch.dict(os.environ, {'SERPER_CACHE': '0'})
+    patcher.start()
+    self.addCleanup(patcher.stop)
 
   def test_init_base(self) -> None:
     serper_api = query_serper.SerperAPI(
