@@ -198,7 +198,8 @@ class OpenAIModel(LM):
                 del active[batch_id]
                 if batch.status != "completed":
                     raise RuntimeError(
-                        f"OpenAI batch {batch_id} ended with status {batch.status}")
+                        f"OpenAI batch {batch_id} ended with status "
+                        f"{batch.status}: {describe_batch_errors(batch)}")
                 chunk_outputs = self._download_openai_batch_chunk(batch, job)
                 offset = job["offset"]
                 outputs[offset:offset + len(chunk_outputs)] = chunk_outputs
@@ -252,6 +253,30 @@ class OpenAIModel(LM):
                 input_file = call_with_retries(
                     lambda: self.client.files.create(file=handle, purpose="batch"),
                     "Batch API input upload")
+
+
+            while True:
+                input_file = call_with_retries(
+                    lambda: self.client.files.retrieve(input_file.id),
+                    f"Batch API input status for {input_file.id}",
+                )
+
+                logging.info(
+                    "Batch input %s status: %s",
+                    input_file.id,
+                    input_file.status,
+                )
+
+                if input_file.status == "processed":
+                    break
+
+                if input_file.status == "error":
+                    raise RuntimeError(
+                        f"Batch input file {input_file.id} failed processing: "
+                        f"{input_file.status_details}"
+                    )
+
+                time.sleep(2)
 
             batch = call_with_retries(
                 lambda: self.client.batches.create(
@@ -314,6 +339,23 @@ class OpenAIModel(LM):
             raise RuntimeError(
                 f"Missing {len(missing)} result(s) from batch {batch.id}: {missing[:5]}")
         return [results[custom_id] for custom_id in expected_ids]
+
+
+def describe_batch_errors(batch):
+    """The validation errors OpenAI attached to a batch, as one readable line.
+
+    A bare "ended with status failed" says nothing about whether the JSONL was
+    malformed, the model was rejected, or the account cannot run batches at all.
+    That reason only lives in batch.errors, so it belongs in the exception.
+    """
+    data = getattr(getattr(batch, "errors", None), "data", None) or []
+    messages = []
+    for error in data:
+        line = getattr(error, "line", None)
+        where = f" (line {line})" if line is not None else ""
+        messages.append(f"{getattr(error, 'code', None)}: "
+                        f"{getattr(error, 'message', None)}{where}")
+    return "; ".join(messages) or "no error detail returned"
 
 
 def should_retry(error):
