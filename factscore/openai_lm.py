@@ -3,13 +3,12 @@ import openai
 import math
 import sys
 import time
-import os
 import numpy as np
 import logging
 import json
-import tempfile
 
 from collections import namedtuple
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from factscore.lm import LM
 from openai import OpenAI
 
@@ -162,9 +161,12 @@ class OpenAIModel(LM):
                                response_format=None):
         """Run uncached prompts through multiple bounded OpenAI Batch jobs.
 
-        Chunks are submitted up to ``openai_max_active_batches`` at a time. Each
-        completed chunk is written to the normal LM cache immediately, so a
-        restarted run only resubmits prompts from unfinished chunks.
+        At most ``openai_max_active_batches`` chunks are in flight at a time,
+        counting both batches OpenAI is running and uploads still on their way
+        there. Uploads run concurrently: each is a multi-megabyte request, and
+        doing them one after another used to serialise the start of every run.
+        Each completed chunk is written to the normal LM cache immediately, so
+        a restarted run only resubmits prompts from unfinished chunks.
         """
         if not prompts:
             return []
@@ -175,53 +177,67 @@ class OpenAIModel(LM):
         ]
         outputs = [None] * len(prompts)
         pending = list(chunks)
+        submitting = []
         active = {}
 
-        while pending or active:
-            while pending and len(active) < self.openai_max_active_batches:
-                offset, chunk_prompts = pending.pop(0)
-                job = self._submit_openai_batch_chunk(
-                    chunk_prompts, offset=offset,
-                    max_output_length=max_output_length,
-                    response_format=response_format)
-                active[job["batch_id"]] = job
+        with ThreadPoolExecutor(max_workers=self.openai_max_active_batches) as pool:
+            while pending or submitting or active:
+                while pending and len(submitting) + len(active) < self.openai_max_active_batches:
+                    offset, chunk_prompts = pending.pop(0)
+                    submitting.append(pool.submit(
+                        self._submit_openai_batch_chunk, chunk_prompts, offset=offset,
+                        max_output_length=max_output_length,
+                        response_format=response_format))
 
-            completed_any = False
-            for batch_id, job in list(active.items()):
-                batch = call_with_retries(
-                    lambda batch_id=batch_id: self.client.batches.retrieve(batch_id),
-                    f"Batch API status for {batch_id}")
-                if batch.status not in {"completed", "failed", "expired", "cancelled"}:
-                    continue
+                # With nothing to poll yet, block until the first upload lands
+                # instead of sleeping a whole poll interval.
+                if submitting and not active:
+                    wait(submitting, return_when=FIRST_COMPLETED)
+                still_submitting = []
+                for future in submitting:
+                    if future.done():
+                        job = future.result()  # re-raises a failed upload
+                        active[job["batch_id"]] = job
+                    else:
+                        still_submitting.append(future)
+                submitting = still_submitting
 
-                completed_any = True
-                del active[batch_id]
-                if batch.status != "completed":
-                    raise RuntimeError(
-                        f"OpenAI batch {batch_id} ended with status "
-                        f"{batch.status}: {describe_batch_errors(batch)}")
-                chunk_outputs = self._download_openai_batch_chunk(batch, job)
-                offset = job["offset"]
-                outputs[offset:offset + len(chunk_outputs)] = chunk_outputs
+                completed_any = False
+                for batch_id, job in list(active.items()):
+                    batch = call_with_retries(
+                        lambda batch_id=batch_id: self.client.batches.retrieve(batch_id),
+                        f"Batch API status for {batch_id}")
+                    if batch.status not in {"completed", "failed", "expired", "cancelled"}:
+                        continue
 
-                # Checkpoint each completed chunk immediately. A restarted run
-                # therefore resubmits only prompts from unfinished/failed chunks.
-                with self.cache_lock:
-                    for prompt, output in zip(
-                            prompts[offset:offset + len(chunk_outputs)], chunk_outputs):
-                        key = f"{prompt.strip()}_{sample_idx}"
-                        if key not in self.cache_dict:
-                            self.add_n += 1
-                        self.cache_dict[key] = output
-                self.save_cache()
+                    completed_any = True
+                    del active[batch_id]
+                    if batch.status != "completed":
+                        raise RuntimeError(
+                            f"OpenAI batch {batch_id} ended with status "
+                            f"{batch.status}: {describe_batch_errors(batch)}")
+                    chunk_outputs = self._download_openai_batch_chunk(batch, job)
+                    offset = job["offset"]
+                    outputs[offset:offset + len(chunk_outputs)] = chunk_outputs
 
-                logging.info(
-                    "Completed OpenAI batch %s (%d requests; %d/%d outputs ready)",
-                    batch_id, len(chunk_outputs),
-                    sum(output is not None for output in outputs), len(outputs))
+                    # Checkpoint each completed chunk immediately. A restarted run
+                    # therefore resubmits only prompts from unfinished/failed chunks.
+                    with self.cache_lock:
+                        for prompt, output in zip(
+                                prompts[offset:offset + len(chunk_outputs)], chunk_outputs):
+                            key = f"{prompt.strip()}_{sample_idx}"
+                            if key not in self.cache_dict:
+                                self.add_n += 1
+                            self.cache_dict[key] = output
+                    self.save_cache()
 
-            if active and not completed_any:
-                time.sleep(self.batch_poll_interval)
+                    logging.info(
+                        "Completed OpenAI batch %s (%d requests; %d/%d outputs ready)",
+                        batch_id, len(chunk_outputs),
+                        sum(output is not None for output in outputs), len(outputs))
+
+                if active and not completed_any:
+                    time.sleep(self.batch_poll_interval)
 
         missing = [index for index, output in enumerate(outputs) if output is None]
         if missing:
@@ -230,71 +246,52 @@ class OpenAIModel(LM):
 
     def _submit_openai_batch_chunk(self, prompts, offset, max_output_length, response_format):
         route = resolve_route(self.model_name)
-        path = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                    mode="w", suffix=".jsonl", encoding="utf-8", delete=False) as handle:
-                path = handle.name
-                for local_index, prompt in enumerate(prompts):
-                    body = build_responses_kwargs(
-                        prompt=prompt, model_name=route.api_model, temp=self.temp,
-                        max_output_tokens=max_output_length, response_format=response_format,
-                        is_reasoning=route.is_reasoning,
-                        reasoning_effort=self.reasoning_effort or route.reasoning_effort)
-                    request = {
-                        "custom_id": f"request-{offset + local_index}",
-                        "method": "POST",
-                        "url": "/v1/responses",
-                        "body": body,
-                    }
-                    handle.write(json.dumps(request, ensure_ascii=False) + "\n")
+        lines = []
+        for local_index, prompt in enumerate(prompts):
+            body = build_responses_kwargs(
+                prompt=prompt, model_name=route.api_model, temp=self.temp,
+                max_output_tokens=max_output_length, response_format=response_format,
+                is_reasoning=route.is_reasoning,
+                reasoning_effort=self.reasoning_effort or route.reasoning_effort)
+            lines.append(json.dumps({
+                "custom_id": f"request-{offset + local_index}",
+                "method": "POST",
+                "url": "/v1/responses",
+                "body": body,
+            }, ensure_ascii=False))
+        # The JSONL is built in memory and handed to the SDK as bytes: nothing
+        # to write, reopen and clean up on disk, and a retried upload trivially
+        # resends the same payload. A 5000-request chunk is tens of megabytes,
+        # well under the Batch API's 200 MB file limit.
+        payload = ("\n".join(lines) + "\n").encode("utf-8")
 
-            with open(path, "rb") as handle:
-                input_file = call_with_retries(
-                    lambda: self.client.files.create(file=handle, purpose="batch"),
-                    "Batch API input upload")
+        input_file = call_with_retries(
+            lambda: self.client.files.create(
+                file=(f"factscore-batch-{offset}.jsonl", payload), purpose="batch"),
+            "Batch API input upload")
+        # No status polling here: the file's `status` field is deprecated and a
+        # batch-purpose upload is already "processed" when files.create returns.
+        # The JSONL itself is validated by batches.create, whose errors
+        # describe_batch_errors() surfaces on the batch object.
+        if getattr(input_file, "status", None) == "error":
+            raise RuntimeError(
+                f"Batch input file {input_file.id} failed processing: "
+                f"{getattr(input_file, 'status_details', None)}")
 
-
-            while True:
-                input_file = call_with_retries(
-                    lambda: self.client.files.retrieve(input_file.id),
-                    f"Batch API input status for {input_file.id}",
-                )
-
-                logging.info(
-                    "Batch input %s status: %s",
-                    input_file.id,
-                    input_file.status,
-                )
-
-                if input_file.status == "processed":
-                    break
-
-                if input_file.status == "error":
-                    raise RuntimeError(
-                        f"Batch input file {input_file.id} failed processing: "
-                        f"{input_file.status_details}"
-                    )
-
-                time.sleep(2)
-
-            batch = call_with_retries(
-                lambda: self.client.batches.create(
-                    input_file_id=input_file.id, endpoint="/v1/responses",
-                    completion_window=self.batch_completion_window,
-                    metadata={"task": "factscore-verdicts", "offset": str(offset)}),
-                "Batch API submission")
-            logging.info(
-                "Submitted OpenAI batch %s with %d requests (offset %d)",
-                batch.id, len(prompts), offset)
-            return {
-                "batch_id": batch.id,
-                "offset": offset,
-                "size": len(prompts),
-            }
-        finally:
-            if path and os.path.exists(path):
-                os.remove(path)
+        batch = call_with_retries(
+            lambda: self.client.batches.create(
+                input_file_id=input_file.id, endpoint="/v1/responses",
+                completion_window=self.batch_completion_window,
+                metadata={"task": "factscore-verdicts", "offset": str(offset)}),
+            "Batch API submission")
+        logging.info(
+            "Submitted OpenAI batch %s with %d requests (offset %d)",
+            batch.id, len(prompts), offset)
+        return {
+            "batch_id": batch.id,
+            "offset": offset,
+            "size": len(prompts),
+        }
 
     def _download_openai_batch_chunk(self, batch, job):
         if not batch.output_file_id:
