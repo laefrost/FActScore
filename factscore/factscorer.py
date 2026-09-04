@@ -251,6 +251,51 @@ class FactScorer(object):
             self.safe_checker = SafeChecker(self.lm)
         return self.safe_checker
 
+    def load_batch_outputs(self, outputs=None, inputs=None, batch_ids=None, overwrite=False):
+        """Recover the verdicts of OpenAI Batch jobs that finished after a run lost contact.
+
+        Each entry of ``outputs`` is a batch's output JSONL (a path, or its parsed
+        records); ``inputs`` optionally gives the matching input JSONLs, and
+        ``batch_ids`` the batch ids (each defaults to the id in a filename like
+        ``batch_<id>_output.jsonl``, and lets the input file - or with no output,
+        the output file too - be fetched from OpenAI). A single value is accepted
+        in place of a list. The verdicts land in the verdict LM's cache, so a
+        following ``get_score`` over the same topics and generations reuses them
+        and only submits prompts the batch did not answer. Returns one summary
+        dict per batch.
+        """
+        if not isinstance(self.lm, OpenAIModel):
+            raise ValueError("Batch outputs can only be loaded into an OpenAI verdict model, "
+                             "not %r" % type(self.lm).__name__)
+
+        def as_list(value, n=None):
+            if value is None:
+                return [None] * (n or 0)
+            if isinstance(value, (str, os.PathLike, dict)):
+                value = [value]
+            return list(value)
+
+        outputs = as_list(outputs)
+        batch_ids = as_list(batch_ids, len(outputs))
+        n = max(len(outputs), len(batch_ids))
+        outputs += [None] * (n - len(outputs))
+        batch_ids += [None] * (n - len(batch_ids))
+        inputs = as_list(inputs, n)
+        if len(inputs) != n:
+            raise ValueError("`inputs` must have one entry per batch output (use None for "
+                             "batches whose input file should be fetched from OpenAI)")
+
+        summaries = []
+        for output, input_file, batch_id in zip(outputs, inputs, batch_ids):
+            summary = self.lm.load_batch_output(output=output, input=input_file,
+                                                batch_id=batch_id, overwrite=overwrite)
+            logging.critical("Loaded OpenAI batch %s: %d verdict(s) imported, %d already cached, "
+                             "%d failed, %d unanswered",
+                             summary["batch_id"], summary["loaded"], summary["already_cached"],
+                             summary["failed"], summary["unanswered"])
+            summaries.append(summary)
+        return summaries
+
     def save_cache(self):
         if self.lm:
             self.lm.save_cache()
@@ -1036,6 +1081,25 @@ if __name__ == '__main__':
                         type=int,
                         default=4,
                         help='Maximum OpenAI Batch API jobs active at once')
+    parser.add_argument('--batch_output_files',
+                        type=str,
+                        nargs='+',
+                        default=None,
+                        help='Output JSONL(s) of OpenAI Batch job(s) that finished after the run '
+                             'lost contact; their verdicts are reused instead of resubmitted')
+    parser.add_argument('--batch_input_files',
+                        type=str,
+                        nargs='+',
+                        default=None,
+                        help='The matching input JSONL(s), one per --batch_output_files entry; '
+                             'fetched from OpenAI by batch id when omitted')
+    parser.add_argument('--batch_ids',
+                        type=str,
+                        nargs='+',
+                        default=None,
+                        help='Batch id(s) to recover; with --batch_output_files, one per file '
+                             '(default: the id in a batch_<id>_output.jsonl filename), on their '
+                             'own the output files are fetched from OpenAI as well')
     parser.add_argument('--fact_checker',
                         type=str,
                         default="factscore",
@@ -1080,6 +1144,11 @@ if __name__ == '__main__':
                 generations.append(dp["output"])
             if args.n_samples is not None and tot==args.n_samples:
                 break
+    if args.batch_output_files or args.batch_ids:
+        fs.load_batch_outputs(outputs=args.batch_output_files,
+                              inputs=args.batch_input_files,
+                              batch_ids=args.batch_ids)
+
     out = fs.get_score(topics=topics,
                        generations=generations,
                        gamma=args.gamma,
