@@ -5,6 +5,13 @@ import time
 
 from concurrent.futures import ThreadPoolExecutor
 
+from factscore.cache_io import atomic_write
+
+# How often an unreadable cache file is re-read before giving up. A writer from
+# an older factscore still saves in place, so a torn file can exist for a moment.
+LOAD_CACHE_RETRIES = 3
+LOAD_CACHE_RETRY_SECONDS = 5
+
 class LM(object):
 
     # How many requests a backend tolerates in flight at once. API-backed
@@ -102,30 +109,34 @@ class LM(object):
     def save_cache(self):
         with self.cache_lock:
             if self.add_n == 0:
+                # nothing new since the last save: skip the reload and full rewrite
                 return
 
             # load the latest cache first, since if there were other processes running in parallel, cache might have been updated
             for k, v in self.load_cache().items():
                 self.cache_dict[k] = v
 
-            with open(self.cache_file, "wb") as f:
-                pickle.dump(self.cache_dict, f)
+            atomic_write(self.cache_file, lambda f: pickle.dump(self.cache_dict, f), mode="wb")
+            # everything in memory is on disk now; add_n counts what the next
+            # save has to write, not the run's total
+            self.add_n = 0
 
     def load_cache(self, allow_retry=True):
-        if os.path.exists(self.cache_file):
-            while True:
-                try:
-                    with open(self.cache_file, "rb") as f:
-                        cache = pickle.load(f)
-                    break
-                except Exception:
-                    if not allow_retry:
-                        assert False
-                    print ("Pickle Error: Retry in 5sec...")
-                    time.sleep(5)        
-        else:
-            cache = {}
-        return cache
+        if not os.path.exists(self.cache_file):
+            return {}
 
-
-
+        attempts = LOAD_CACHE_RETRIES if allow_retry else 1
+        for attempt in range(1, attempts + 1):
+            try:
+                with open(self.cache_file, "rb") as f:
+                    return pickle.load(f)
+            except Exception as e:
+                if attempt == attempts:
+                    # used to retry forever which, called from save_cache under
+                    # cache_lock, froze every worker thread with no way out
+                    raise RuntimeError(
+                        f"Cannot read the cache file {self.cache_file}: {e!r}. It is most "
+                        "likely a torn write from a killed or concurrent run; move it aside "
+                        "(or restore a copy) and rerun.") from e
+                print("Pickle Error: Retry in %d sec..." % LOAD_CACHE_RETRY_SECONDS)
+                time.sleep(LOAD_CACHE_RETRY_SECONDS)

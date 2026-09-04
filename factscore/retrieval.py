@@ -9,6 +9,8 @@ import torch
 
 from rank_bm25 import BM25Okapi
 
+from factscore.cache_io import atomic_write
+
 SPECIAL_SEPARATOR = "####SPECIAL####SEPARATOR####"
 MAX_LENGTH = 256
 
@@ -108,6 +110,27 @@ class DocDB(object):
         assert len(results)>0, f"`topic` in your data ({title}) is likely to be not a valid title in the DB."
         return results
 
+
+def _merge_from_disk(path, mode, load, target):
+    """Fold the on-disk copy of a cache into `target`.
+
+    Saving rewrites the whole file, so entries another process wrote since this
+    one loaded would otherwise be lost. Same semantics as before: an entry on
+    disk wins over the in-memory one for the same key.
+    """
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, mode) as f:
+            on_disk = load(f)
+    except Exception as e:
+        raise RuntimeError(
+            f"Cannot read the retrieval cache {path}: {e!r}. It is most likely a torn "
+            "write from a killed or concurrent run; move it aside and rerun (its entries "
+            "are recomputed locally, without API calls).") from e
+    target.update(on_disk)
+
+
 class Retrieval(object):
 
     def __init__(self, db, cache_path, embed_cache_path,
@@ -141,35 +164,21 @@ class Retrieval(object):
         assert self.batch_size is not None
     
     def load_cache(self):
-        if os.path.exists(self.cache_path):
-            with open(self.cache_path, "r") as f:
-                self.cache = json.load(f)
-        else:
-            self.cache = {}
-        if os.path.exists(self.embed_cache_path):
-            with open(self.embed_cache_path, "rb") as f:
-                self.embed_cache = pkl.load(f)
-        else:
-            self.embed_cache = {}
-    
+        self.cache = {}
+        _merge_from_disk(self.cache_path, "r", json.load, self.cache)
+        self.embed_cache = {}
+        _merge_from_disk(self.embed_cache_path, "rb", pkl.load, self.embed_cache)
+
     def save_cache(self):
         if self.add_n > 0:
-            if os.path.exists(self.cache_path):
-                with open(self.cache_path, "r") as f:
-                    new_cache = json.load(f)
-                self.cache.update(new_cache)
-            
-            with open(self.cache_path, "w") as f:
-                json.dump(self.cache, f)
-        
+            _merge_from_disk(self.cache_path, "r", json.load, self.cache)
+            atomic_write(self.cache_path, lambda f: json.dump(self.cache, f), mode="w")
+            self.add_n = 0
+
         if self.add_n_embed > 0:
-            if os.path.exists(self.embed_cache_path):
-                with open(self.embed_cache_path, "rb") as f:
-                    new_cache = pkl.load(f)
-                self.embed_cache.update(new_cache)
-            
-            with open(self.embed_cache_path, "wb") as f:
-                pkl.dump(self.embed_cache, f)
+            _merge_from_disk(self.embed_cache_path, "rb", pkl.load, self.embed_cache)
+            atomic_write(self.embed_cache_path, lambda f: pkl.dump(self.embed_cache, f), mode="wb")
+            self.add_n_embed = 0
 
     def get_bm25_passages(self, topic, query, passages, k):
         if topic in self.embed_cache:
