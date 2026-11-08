@@ -64,6 +64,10 @@ python -m factscore.factscorer --input_path {input_path} --model_name {estimator
 
 - `--input_path` can be something like `data/unlabeled/InstructGPT.jsonl`. It should be a `.jsonl` format where each line contains `topic` (a topic entity that corresponds to the Wikipedia title) and `output` (a generation from the model).
 - `--model_name`: `retrieval+ChatGPT` and `retrieval+llama+npm` (You can also use `retrieval+ChatGPT+npm` or `retrieval+llama` but we recommend the former two.)
+  Claude verdict models: `retrieval+claude-haiku-5-5` (the price and size match
+  for `retrieval+gpt-5.6-luna`) and `retrieval+claude-sonnet-5-5` (the step up in
+  quality, about ten times the price). They need `ANTHROPIC_API_KEY` or
+  `--anthropic_key` and no OpenAI key; see [Claude verdict models](#claude-verdict-models).
 - `--openai_key`: File containing OpenAI API Key.
 
 **Optional flags**:
@@ -178,3 +182,132 @@ for fn in os.listdir(dirname):
     ))
 ```
 
+## OpenAI Batch API and recovering a lost batch
+
+With `--openai_batch_api` (or `FactScorer(use_openai_batch_api=True)`) the
+True/False verdict prompts are submitted through the asynchronous Batch API in
+chunks of `--openai_batch_size` requests. Each finished chunk is written to the
+LM cache immediately, so a restarted run only resubmits unfinished chunks.
+
+If the process loses contact with a batch that OpenAI goes on to complete,
+download its output file from the dashboard (named like
+`batch_<id>_output.jsonl`) and feed it back in instead of paying for the
+prompts again:
+
+```bash
+python -m factscore.factscorer --input_path data/unlabeled/InstructGPT.jsonl \
+    --model_name "retrieval+gpt-5.6-luna" --openai_batch_api \
+    --batch_output_files batch_6a99708aa4c48190b42479cb03e60fa1_output.jsonl
+```
+
+or from Python, before the usual `get_score` call:
+
+```python
+fs = FactScorer(model_name="retrieval+gpt-5.6-luna", use_openai_batch_api=True)
+fs.load_batch_outputs(["batch_6a99708aa4c48190b42479cb03e60fa1_output.jsonl"])
+out = fs.get_score(topics=topics, generations=generations)
+```
+
+The output lines carry only a `custom_id`, not the prompt, so the prompts are
+read from the batch's input file. By default it is fetched from OpenAI using
+the batch id in the filename (or `batch_ids=[...]`); pass the downloaded input
+JSONL(s) as `inputs=[...]` / `--batch_input_files` to stay offline. With only
+a batch id, `fs.load_batch_outputs(batch_ids=["batch_..."])` fetches the
+output file too. The verdicts go into the LM cache, so the following
+`get_score` reuses them and submits a new batch only for prompts the recovered
+batch did not answer.
+
+## Fact checkers
+
+`--fact_checker` (or `FactScorer(fact_checker=...)`) picks how the generation is
+checked once it has been split into atomic facts:
+
+- `factscore` (default): retrieve passages from the knowledge source and ask the
+  LM for a True/False verdict per atomic fact.
+- `safe`: [SAFE](eval/safe/README.md) - revise each atomic fact to be
+  self-contained, drop the ones irrelevant to the prompt, and ground the rest
+  in Google Search (needs a Serper key).
+- `entity`: the [entity annotation pipeline](eval/entity/README.md) of
+  [hallucination_probes](https://github.com/obalcells/hallucination_probes/tree/main/annotation_pipeline).
+  It does not use atomic facts at all: one Claude call per generation, with
+  Anthropic's web search tool, extracts the entity spans (people,
+  organisations, locations, dates, quantities, citations), verifies each one
+  and labels it `Supported`, `Not Supported` or `Insufficient Information`.
+  The spans are then located in the generation text.
+
+### Claude verdict models
+
+The default `factscore` checker can ask a Claude model for the True/False
+verdicts instead of an OpenAI one:
+
+```bash
+export ANTHROPIC_API_KEY=...   # or put the key in anthropic.key / --anthropic_key
+python -m factscore.factscorer --input_path {input_path} --model_name retrieval+claude-haiku-5-5
+```
+
+```python
+fs = FactScorer(model_name="retrieval+claude-haiku-5-5")   # or retrieval+claude-sonnet-5-5
+```
+
+- `retrieval+claude-haiku-5-5` is the equivalent of `retrieval+gpt-5.6-luna`:
+  the small tier, at $0.10 / $0.50 per 1M input / output tokens against Luna's
+  $0.20 / $1.20. `retrieval+claude-sonnet-5-5` ($2 / $10) is the step up.
+  Both ids also work without the `retrieval+` prefix (the verdict is then
+  given without retrieved passages, like `gpt-4o-mini` vs `retrieval+gpt-4o-mini`).
+- The verdict is a classification, so the model is asked not to think
+  (`thinking: disabled` on Haiku, `thinking: between_tools` on Sonnet 5.5,
+  which rejects `disabled`; `anthropic_lm.no_thinking_kwargs` picks the form).
+  The `entity` checker leaves thinking on.
+- The Anthropic API returns no logprobs, so `p_true` is `None` and the verdict
+  is parsed from the one-word answer, as for the OpenAI reasoning models.
+- Verdicts are cached in `{cache_dir}/{model id}.pkl`, shared between the
+  `retrieval+` and plain forms (the prompts differ, so the entries do not
+  collide). The OpenAI Batch API flag does not apply to these models.
+
+### The `entity` checker
+
+```bash
+export ANTHROPIC_API_KEY=...   # or put the key in anthropic.key
+python -m factscore.factscorer --input_path data/unlabeled/InstructGPT.jsonl \
+    --model_name claude-opus-5 --fact_checker entity --entity_max_searches 10
+```
+
+```python
+fs = FactScorer(model_name="claude-opus-5", fact_checker="entity", entity_max_searches=10)
+out = fs.get_score(topics=topics, generations=generations, questions=questions,
+                   do_matching=True, gen_words=gen_words, word_tokens=word_tokens)
+```
+
+- `--model_name` must be a Claude model id (`claude-opus-5`, `claude-sonnet-5`,
+  ... ; the original pipeline ran on `claude-sonnet-4-20250514`). The model
+  is used through [`factscore/anthropic_lm.py`](factscore/anthropic_lm.py),
+  which attaches the web search tool and caches answers in
+  `{cache_dir}/{model_name}.pkl` like the other backends.
+- **Atomic facts** (the default `factscore` checker, not the entity one) are
+  generated by `claude-haiku-5-5` (`atomic_facts.ATOMIC_FACT_MODEL`) since
+  OpenAI retired `gpt-3.5-turbo-instruct`. It needs the same Anthropic key
+  (`ANTHROPIC_API_KEY` or `--anthropic_key`, default `anthropic.key`); the
+  prompt carries an explicit "one fact per line, starting with `- `" instruction
+  and answers are cached in `{cache_dir}/atomic_facts_claude-haiku-5-5.pkl`.
+- `questions` (or, failing that, `topics`) is what the annotator is told the
+  generation answers; the atomic fact generator is not run, so
+  `--use_atomic_facts` / `atomic_facts` only decide which rows are skipped.
+- **Cost**: one call per generation plus up to `--entity_max_searches` web
+  searches (10 by default; 15 in the original run script). Anthropic bills
+  each search on top of the tokens, and the search results are added to the
+  context, so this is the main cost knob. `--entity_max_searches 0` labels from
+  the model's own knowledge without searching.
+- **Output**: each decision is one span: `atom` is the span text, `annotation`
+  the pipeline's label, `verification_note` its reasoning, `span_index` the
+  character offset in the generation. `is_supported` is `True` for
+  `Supported`, `False` for `Not Supported` and `Insufficient Information` (as
+  the pipeline treats them downstream), and `None` (excluded from the score,
+  `parse_failed`) for a span that could not be located in the generation.
+  With `do_matching`, located spans are mapped onto `gen_words` /
+  `word_tokens` by character offset rather than by word matching. The
+  per-generation entry in `scores` carries the model's raw answer, its stop
+  reason and the number of searches under `entity`.
+- On Claude Opus 5 / Fable models the request asks for a server-side fallback
+  model (`fallbacks: "default"`) so that a safety refusal does not leave the
+  generation unannotated; pass `refusal_fallbacks=False` to `AnthropicModel`
+  to switch that off.

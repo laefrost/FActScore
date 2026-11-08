@@ -9,12 +9,13 @@ from pydantic import BaseModel
 
 from tqdm import tqdm
 from factscore.abstain_detection import is_response_abstained
-from factscore.atomic_facts import AtomicFactGenerator
+from factscore.atomic_facts import AtomicFactGenerator, ATOMIC_FACT_MODEL
 from factscore.clm import CLM
 from factscore.gpt_oss_lm import Oss
 from factscore.hf_lm import HFInf
 from factscore.npm import NPM
 from factscore.openai_lm import OpenAIModel
+from factscore.anthropic_lm import AnthropicModel, no_thinking_kwargs
 from factscore.retrieval import DocDB, Retrieval
 import re
 from transformers import AutoTokenizer
@@ -48,8 +49,47 @@ VERDICT_RESPONSE_FORMAT = {
 # Surface forms of the verdict tokens, most vocabulary-specific first:
 # "▁True" is SentencePiece (LLaMA-1/2), "ĠTrue" is byte-level BPE (GPT-2/o200k).
 # How each atomic fact is checked once the atoms have been extracted. The atom
-# extraction, and everything after the check (matching, scoring), is shared.
-FACT_CHECKERS = ("factscore", "safe")
+# extraction, and everything after the check (matching, scoring), is shared -
+# except for "entity", which extracts its own spans from the whole generation
+# and skips the atomic fact step.
+FACT_CHECKERS = ("factscore", "safe", "entity")
+
+
+def _nested_positions(lst):
+    """Every leaf of a nested list replaced by its running index, nesting kept."""
+    counter = 0
+
+    def walk(x):
+        nonlocal counter
+        if isinstance(x, list):
+            return [walk(i) for i in x]
+
+        idx = counter
+        counter += 1
+        return idx
+    return walk(lst)
+
+
+def _word_char_spans(text, words):
+    """(start, end) of each of `words` in `text`, or None where a word is not found.
+
+    `words` are the generated words in order, so each one is looked for after
+    the previous match; a word that is not found does not move the cursor.
+    """
+    spans = []
+    pos = 0
+    for word in words:
+        surface = (word or "").strip()
+        if not surface:
+            spans.append(None)
+            continue
+        start = text.find(surface, pos)
+        if start < 0:
+            spans.append(None)
+            continue
+        spans.append((start, start + len(surface)))
+        pos = start + len(surface)
+    return spans
 
 
 _TRUE_SURFACES = ("▁True", "ĠTrue", " True", "True")
@@ -157,25 +197,44 @@ class FactScorer(object):
                  batch_poll_interval=30.0,
                  openai_batch_size=5000,
                  openai_max_active_batches=4,
-                 fact_checker="factscore"):
-        assert model_name in ["retrieval+llama", "retrieval+llama+npm", "retrieval+ChatGPT", "npm",
-                              "retrieval+ChatGPT+npm", "ChatGPT", "gpt-oss", "retrieval+gpt-oss-20b",
-                              "hf-inf", "retrieval+hf-inf", "gpt-4o-mini", "gpt-5-mini", "gpt-5.6-luna",
-                              "retrieval+gpt-4o-mini", "retrieval+gpt-5-mini", "retrieval+gpt-5.6-luna"]
+                 fact_checker="factscore",
+                 anthropic_key="anthropic.key",
+                 entity_max_searches=10,
+                 entity_max_tokens=8192,
+                 entity_prompt_path=None):
+        known_models = ["retrieval+llama", "retrieval+llama+npm", "retrieval+ChatGPT", "npm",
+                        "retrieval+ChatGPT+npm", "ChatGPT", "gpt-oss", "retrieval+gpt-oss-20b",
+                        "hf-inf", "retrieval+hf-inf", "gpt-4o-mini", "gpt-5-mini", "gpt-5.6-luna",
+                        "retrieval+gpt-4o-mini", "retrieval+gpt-5-mini", "retrieval+gpt-5.6-luna",
+                        # Claude verdict models: Haiku 5.5 is the price/size match for
+                        # gpt-5.6-luna, Sonnet 5.5 the step up in quality
+                        "claude-haiku-5-5", "claude-sonnet-5-5",
+                        "retrieval+claude-haiku-5-5", "retrieval+claude-sonnet-5-5"]
+        # any other Claude model id is accepted as is (e.g. "claude-opus-5")
+        assert model_name in known_models or "claude" in model_name, \
+            f"Unknown `model_name` {model_name!r}"
         assert fact_checker in FACT_CHECKERS, \
             f"`fact_checker` should be one of {FACT_CHECKERS}, got {fact_checker!r}"
         self.model_name = model_name
         # "factscore": retrieve passages, then ask for a True/False verdict.
         # "safe": run eval/safe - revise each atom, drop the ones irrelevant to
         # the prompt, and ground the rest in Google Search.
+        # "entity": run eval/entity - one Claude + web search call per
+        # generation that extracts and labels its entity spans (needs a
+        # claude-* model_name; entity_max_searches is the cost knob).
         self.fact_checker = fact_checker
         self.safe_checker = None
+        self.entity_checker = None
+        self.entity_max_searches = entity_max_searches
+        self.entity_max_tokens = entity_max_tokens
+        self.entity_prompt_path = entity_prompt_path
 
         self.db = {}
         self.retrieval = {}
         self.npm = {}
         self.batch_size = batch_size # batch size for retrieval
         self.openai_key = openai_key
+        self.anthropic_key = anthropic_key
         self.abstain_detection_type = abstain_detection_type
 
         self.data_dir = data_dir
@@ -209,8 +268,18 @@ class FactScorer(object):
                                   openai_batch_size=openai_batch_size,
                                   openai_max_active_batches=openai_max_active_batches)
             #self.backup_lm = OpenAIModel(model_name='')
-        elif "hf" in model_name: 
+        elif "hf" in model_name:
             self.lm = HFInf(model_name="hf-inf", model_id="meta-llama/Llama-3.2-3B-Instruct", cache_file=os.path.join(cache_dir, "hf.pkl"))
+        elif "claude" in model_name:
+            claude_model = model_name[len("retrieval+"):] if model_name.startswith("retrieval+") else model_name
+            # The entity checker wants the model to reason and search (web
+            # search is switched on when that checker is built). A verdict is a
+            # one-word classification, so for the factscore checker the model is
+            # asked not to think (see anthropic_lm.no_thinking_kwargs).
+            lm_kwargs = {} if fact_checker == "entity" else no_thinking_kwargs(claude_model)
+            self.lm = AnthropicModel(model_name=model_name,
+                                     cache_file=os.path.join(cache_dir, f"{claude_model}.pkl"),
+                                     key_path=anthropic_key, **lm_kwargs)
         else:
             self.lm = None
 
@@ -250,6 +319,19 @@ class FactScorer(object):
                                  % self.model_name)
             self.safe_checker = SafeChecker(self.lm)
         return self.safe_checker
+
+    def _get_entity_checker(self):
+        """The entity checker, built on first use (see factscore/entity_checker.py)."""
+        if self.entity_checker is None:
+            from factscore.entity_checker import EntityChecker
+            if self.lm is None:
+                raise ValueError("The entity fact checker needs an LM; `model_name`=%r has none."
+                                 % self.model_name)
+            self.entity_checker = EntityChecker(self.lm,
+                                                max_searches=self.entity_max_searches,
+                                                max_tokens=self.entity_max_tokens,
+                                                prompt_path=self.entity_prompt_path)
+        return self.entity_checker
 
     def load_batch_outputs(self, outputs=None, inputs=None, batch_ids=None, overwrite=False):
         """Recover the verdicts of OpenAI Batch jobs that finished after a run lost contact.
@@ -358,8 +440,9 @@ class FactScorer(object):
                   word_tokens = None, 
                   tokenizer_name = None):
         
-        if self.fact_checker == "safe":
-            # SAFE grounds every atom in Google Search, so nothing is retrieved
+        if self.fact_checker in ("safe", "entity"):
+            # both check against the web (SAFE through Google Search, the entity
+            # checker through Claude's web search), so nothing is retrieved
             # from a local knowledge source
             knowledge_source = None
         else:
@@ -379,14 +462,36 @@ class FactScorer(object):
             assert type(topics)==type(generations)==list, "`topics` and `generations` should be lists."
             assert len(topics)==len(generations), "`topics` and `generations` should have the same length"
 
-        if atomic_facts is not None:
+        if self.fact_checker == "entity":
+            # The entity checker extracts its own spans from the whole
+            # generation, so the atomic fact generator is not run. A row is
+            # skipped (None) when the response is abstained, or when the given
+            # atomic_facts mark it None; the given facts themselves are unused.
+            given = atomic_facts
+            if given is not None:
+                assert len(topics)==len(given), "`topics` and `atomic_facts` should have the same length"
+                logging.warning("fact_checker='entity' labels the entity spans it extracts itself; "
+                                "the atomic_facts passed in only decide which rows are skipped.")
+            atomic_facts = []
+            corresponding_sentences = []
+            for i, gen in enumerate(generations):
+                if given is not None:
+                    skipped = given[i] is None
+                else:
+                    skipped = is_response_abstained(gen, self.abstain_detection_type)
+                # [] stands for "spans still to be found by the checker"
+                atomic_facts.append(None if skipped else [])
+                corresponding_sentences.append(None if skipped else [])
+        elif atomic_facts is not None:
             assert len(topics)==len(atomic_facts), "`topics` and `atomic_facts` should have the same length"
             corresponding_sentences = atomic_facts
         else:
             if self.af_generator is None:
-                self.af_generator = AtomicFactGenerator(key_path=self.openai_key,
+                # atomic facts come from Claude (see atomic_facts.ATOMIC_FACT_MODEL);
+                # gpt-3.5-turbo-instruct, whose cache was InstructGPT.pkl, is retired
+                self.af_generator = AtomicFactGenerator(key_path=self.anthropic_key,
                                                         demon_dir=os.path.join(self.data_dir, "demos"),
-                                                        gpt3_cache_file=os.path.join(self.cache_dir, "InstructGPT.pkl"))
+                                                        cache_file=os.path.join(self.cache_dir, f"atomic_facts_{ATOMIC_FACT_MODEL}.pkl"))
 
             # estimate the total cost of atomic fact generation
             total_words = 0
@@ -449,10 +554,12 @@ class FactScorer(object):
             questions = [None] * len(generations)
         if true_answers is None: 
             true_answers = [None] * len(generations)
-        if gen_words is None: 
-            true_answers = [None] * len(generations)
-        
-        
+        if gen_words is None:
+            gen_words = [None] * len(generations)
+        if word_tokens is None:
+            word_tokens = [None] * len(generations)
+
+
         rows = list(zip(topics, generations, atomic_facts, corresponding_sentences,
                         true_answers, questions, gen_words, word_tokens))
 
@@ -478,7 +585,7 @@ class FactScorer(object):
                                   for request in requests])
 
         # Phase 3 (serial): verdict parsing, npm and matching are all local work.
-        for row, requests in zip(rows, requests_per_row):
+        for row_idx, (row, requests) in enumerate(zip(rows, requests_per_row)):
             topic, generation, facts, sentences, true_answer, question, gen_word, wt = row
             if requests is None:
                 decisions.append(None)
@@ -489,9 +596,10 @@ class FactScorer(object):
                 num_unparsed = len(decision) - len(verdicts)
                 score = np.mean(verdicts) if verdicts else np.nan
                 sents = [d["sentence"] for d in decision]
-                # SAFE drops the atoms it judged irrelevant, so the checked
+                # SAFE drops the atoms it judged irrelevant and the entity
+                # checker only finds its spans now, so for both the checked
                 # atoms are read back off the decisions instead of `facts`
-                checked_facts = [d["atom"] for d in decision] if self.fact_checker == "safe" else facts
+                checked_facts = facts if self.fact_checker == "factscore" else [d["atom"] for d in decision]
                 # if gamma:
                 #     init_scores.append(score)
                 #     penalty = 1.0 if len(facts)>gamma else np.exp(1-gamma/len(facts))
@@ -499,7 +607,15 @@ class FactScorer(object):
 
                 decisions.append(decision)
                 scores.append(score)
-                score_list.append({"facts" : checked_facts, "sentence" : sents, "score" : score, "generation" : generation, "topic" : topic, "num_unparsed" : num_unparsed})
+                entry = {"facts" : checked_facts, "sentence" : sents, "score" : score, "generation" : generation, "topic" : topic, "num_unparsed" : num_unparsed}
+                if self.fact_checker == "entity":
+                    # the spans' sentences were unknown before the annotation
+                    corresponding_sentences[row_idx] = sents
+                    result = requests[0]["entity"] if requests else None
+                    entry["entity"] = {key: result.get(key) if result else None
+                                       for key in ("error", "stop_reason", "num_web_searches",
+                                                   "usage", "response_text")}
+                score_list.append(entry)
                 if len(scores) % 10 == 0:
                     self.save_cache()
         self.save_cache()
@@ -546,6 +662,25 @@ class FactScorer(object):
         """
         requests = []
         total_words = 0
+        if self.fact_checker == "entity":
+            # One call per generation: the checker extracts and labels the
+            # entity spans itself, so there is nothing to build per atom and
+            # nothing to retrieve; the work happens in _run_entity_requests.
+            requests.append({"topic": topic,
+                             "atom": None,
+                             "sentence": None,
+                             "prompt": None,
+                             "lm": self.lm,
+                             "retrieval_failed": False,
+                             "output": None,
+                             # what the annotator is told the generation
+                             # answers: the question asked, else the topic
+                             "instruction": question if question is not None else topic,
+                             "generation": generation,
+                             # filled in by _run_entity_requests
+                             "entity": None})
+            return requests, total_words
+
         for atom, sent in zip(atomic_facts, sentences):
             atom = atom.strip()
 
@@ -632,6 +767,9 @@ class FactScorer(object):
         if self.fact_checker == "safe":
             self._run_safe_requests(requests)
             return
+        if self.fact_checker == "entity":
+            self._run_entity_requests(requests)
+            return
 
         by_backend = defaultdict(list)
         for request in requests:
@@ -656,8 +794,126 @@ class FactScorer(object):
         for request, result in zip(requests, results):
             request["safe"] = result
 
+    def _run_entity_requests(self, requests):
+        """Annotate every generation with the entity pipeline, pooled across all of them."""
+        if not requests:
+            return
+
+        checker = self._get_entity_checker()
+        results = checker.annotate([(request["instruction"], request["generation"])
+                                    for request in requests])
+        for request, result in zip(requests, results):
+            request["entity"] = result
+
+    def _matching_fields(self, text, do_matching, gen_words, word_tokens, tokenizer_name, selected=None):
+        """The matched_* fields of a decision: the generated words (and their tokens) `text` maps to.
+
+        With `selected` the word indices are already known (an entity span
+        located by character offset); otherwise the words of `text` that occur
+        in the generation are matched in order by _match_string.
+        """
+        if not do_matching or gen_words is None:
+            return {"matched_words": gen_words,
+                    "matched_word_indices": list(range(len(gen_words))) if gen_words is not None else None,
+                    "matched_token_indices": None,
+                    "matched_word_token_indices": None}
+
+        if selected:
+            token_positions = _nested_positions(word_tokens) if word_tokens is not None else None
+            match_words = [gen_words[i] for i in selected]
+            # keyed by (word, occurrence#) like _match_string's result
+            occurrence = defaultdict(int)
+            word_indices = {}
+            token_indices = {}
+            word_token_indices = defaultdict(list)
+            for word, i in zip(match_words, selected):
+                key = (word, occurrence[word])
+                occurrence[word] += 1
+                tokens = token_positions[i] if token_positions is not None and i < len(token_positions) else None
+                word_indices[key] = i
+                token_indices[key] = tokens
+                word_token_indices[word].append(tokens)
+            return {"matched_words": match_words,
+                    "matched_word_indices": word_indices,
+                    "matched_token_indices": token_indices,
+                    "matched_word_token_indices": dict(word_token_indices)}
+
+        set_gen_words = set(word.lower() for word in gen_words)   # set = fast lookups, order untouched
+        match_words = [w for w in word_tokenize(text.lower()) if w in set_gen_words]
+        word_indices, token_indices, word_token_indices = self._match_string(text, match_words, gen_words, word_tokens, tokenizer_name)
+        return {"matched_words": match_words,
+                "matched_word_indices": word_indices,
+                "matched_token_indices": token_indices,
+                "matched_word_token_indices": word_token_indices}
+
+    def _finalize_entity_decisions(self, requests, do_matching = False, gen_words = None, word_tokens = None, tokenizer_name = None):
+        """One decision per entity span the annotator found in the generation.
+
+        Supported -> True; Not Supported and Insufficient Information -> False
+        (as the pipeline treats them downstream). A span without a label, i.e.
+        one that could not be located in the generation, -> None and is
+        flagged parse_failed. A located span is mapped onto the generated words
+        by its character offset; the word matching of the other checkers is
+        the fallback.
+        """
+        from factscore.entity_checker import SUPPORTED_LABEL, sentence_at, sentence_spans
+
+        decisions = []
+        for request in requests:
+            generation = request["generation"]
+            result = request["entity"]
+            if result is None or result.get("spans") is None:
+                logging.error("No entity annotation for topic %r: %s", request["topic"],
+                              result["error"] if result else "the checker returned nothing")
+                continue
+
+            sentences = sentence_spans(generation)
+            word_spans = _word_char_spans(generation, gen_words) if do_matching and gen_words else None
+
+            for span in result["spans"]:
+                text = span["span"]
+                label = span.get("label")
+                index = span.get("index")
+                if label is None:
+                    is_supported = None
+                    parse_failed = True
+                else:
+                    is_supported = label == SUPPORTED_LABEL
+                    parse_failed = False
+
+                sentence = None
+                selected = None
+                if index is not None:
+                    sentence = sentence_at(generation, sentences, index, len(text))
+                    if word_spans is not None:
+                        end = index + len(text)
+                        selected = [i for i, ws in enumerate(word_spans)
+                                    if ws is not None and ws[0] < end and ws[1] > index]
+                matching = self._matching_fields(text, do_matching, gen_words, word_tokens,
+                                                 tokenizer_name, selected=selected or None)
+
+                decision = {"atom": text,
+                            "is_supported": is_supported,
+                            "p_true": None,
+                            "retrieval_failed": False,
+                            "parse_failed": parse_failed,
+                            "sentence": sentence,
+                            # the pipeline's label with its reasoning, and where
+                            # the span sits in the generation
+                            "annotation": label,
+                            "verification_note": span.get("verification_note"),
+                            "span_index": index}
+                decision.update(matching)
+                decisions.append(decision)
+
+        return decisions
+
     def _finalize_decisions(self, requests, knowledge_source = None, do_matching = False, gen_words = None, word_tokens = None, tokenizer_name = None):
         """Turn answered requests into decision records. Local work only."""
+        if self.fact_checker == "entity":
+            return self._finalize_entity_decisions(requests, do_matching=do_matching, gen_words=gen_words,
+                                                   word_tokens=word_tokens, tokenizer_name=tokenizer_name)
+
         decisions = []
         for request in requests:
             atom = request["atom"]
@@ -709,16 +965,8 @@ class FactScorer(object):
                 npprob = self.npm[knowledge_source].get_probabilty(request["topic"], atom)
                 is_supported = npprob > 0.3
 
-            if do_matching:
-                set_gen_words = set(word.lower() for word in gen_words)   # set = fast lookups, order untouched
-                # maybe switch to atom?
-                match_words = [w for w in word_tokenize(sent.lower()) if w in set_gen_words]
-                matched_word_indices, token_indices, word_token_indices = self._match_string(sent, match_words, gen_words, word_tokens, tokenizer_name)
-            else:
-                match_words = gen_words
-                matched_word_indices = list(range(len(gen_words)))
-                token_indices = None
-                word_token_indices = None
+            # maybe switch to atom?
+            matching = self._matching_fields(sent, do_matching, gen_words, word_tokens, tokenizer_name)
 
             decision = {"atom": atom,
                         # True / False, or None when the verdict was unparseable
@@ -727,11 +975,8 @@ class FactScorer(object):
                         "p_true": p_true,
                         "retrieval_failed": request["retrieval_failed"],
                         "parse_failed": parse_failed,
-                        "sentence" : sent,
-                        "matched_words" : match_words,
-                        "matched_word_indices" : matched_word_indices,
-                        "matched_token_indices" : token_indices,
-                        "matched_word_token_indices" : word_token_indices}
+                        "sentence" : sent}
+            decision.update(matching)
 
             if self.fact_checker == "safe":
                 # Supported / Not Supported, the self-contained rewrite of the
@@ -918,20 +1163,8 @@ class FactScorer(object):
         # print('final_token_indices',final_token_indices)
         # print("-------------------------------------")
         
-        def expl(lst):
-            counter = 0
-            def walk(x):
-                nonlocal counter
-                if isinstance(x, list):
-                    return [walk(i) for i in x]
+        token_positions = _nested_positions(word_tokens)
 
-                idx = counter
-                counter += 1
-                return idx
-            return walk(lst)
-        
-        token_positions = expl(word_tokens)
-        
         word_to_indices = defaultdict(list)
         token_to_indices = defaultdict(list)
         def normalize(word):
@@ -1035,6 +1268,11 @@ if __name__ == '__main__':
     parser.add_argument('--openai_key',
                         type=str,
                         default="api.key")
+    parser.add_argument('--anthropic_key',
+                        type=str,
+                        default="anthropic.key",
+                        help="Anthropic key file for claude-* models and the atomic fact generator "
+                             "(ANTHROPIC_API_KEY takes precedence)")
     parser.add_argument('--data_dir',
                         type=str,
                         default=".cache/factscore/")
@@ -1105,7 +1343,18 @@ if __name__ == '__main__':
                         default="factscore",
                         choices=list(FACT_CHECKERS),
                         help='How each atomic fact is checked: factscore (retrieval + True/False '
-                             'verdict) or safe (eval/safe: relevance filter + Google Search)')
+                             'verdict), safe (eval/safe: relevance filter + Google Search) or '
+                             'entity (eval/entity: Claude + web search extracts and labels the '
+                             'entity spans of the whole generation; needs a claude-* --model_name)')
+    parser.add_argument('--entity_max_searches',
+                        type=int,
+                        default=10,
+                        help='Web searches the entity checker may run per generation, its main '
+                             'cost knob; 0 labels from the model\'s own knowledge')
+    parser.add_argument('--entity_max_tokens',
+                        type=int,
+                        default=8192,
+                        help='max_tokens of the entity annotation answer')
 
     args = parser.parse_args()
 
@@ -1118,13 +1367,16 @@ if __name__ == '__main__':
                     model_dir=args.model_dir,
                     cache_dir=args.cache_dir,
                     openai_key=args.openai_key,
+                    anthropic_key=args.anthropic_key,
                     cost_estimate=args.cost_estimate,
                     abstain_detection_type=args.abstain_detection_type,
                     use_openai_batch_api=args.openai_batch_api,
                     batch_poll_interval=args.batch_poll_interval,
                     openai_batch_size=args.openai_batch_size,
                     openai_max_active_batches=args.openai_max_active_batches,
-                    fact_checker=args.fact_checker)
+                    fact_checker=args.fact_checker,
+                    entity_max_searches=args.entity_max_searches,
+                    entity_max_tokens=args.entity_max_tokens)
 
     tot = 0
     topics, generations, atomic_facts = [], [], []

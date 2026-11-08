@@ -6,7 +6,6 @@ import string
 import spacy
 import sys
 import nltk
-import openai
 from rank_bm25 import BM25Okapi
 import os
 import time
@@ -14,18 +13,36 @@ import nltk
 nltk.download('punkt_tab')
 from nltk.tokenize import sent_tokenize
 
-from factscore.openai_lm import OpenAIModel
+from factscore.anthropic_lm import AnthropicModel, no_thinking_kwargs
+
+# The atomic fact generator ran on gpt-3.5-turbo-instruct, which OpenAI has
+# retired. Claude Haiku 5.5 replaces it: cheaper than the old model and more
+# than capable of the few-shot decomposition. Thinking is turned off so the
+# response is the fact list alone (thinking tokens would count against the
+# small max_tokens of this call), and no web search tool is attached.
+ATOMIC_FACT_MODEL = "claude-haiku-5-5"
+ATOMIC_FACT_MAX_OUTPUT_TOKENS = 256
+
+# The old model continued the prompt, so the demos alone fixed the output
+# format. A chat model answers instead, so this instruction pins the format
+# that text_to_sentences() parses: one fact per line, each starting with "- ".
+FORMAT_INSTRUCTION = (
+    "Break the final sentence down into independent facts, following the examples. "
+    "Reply with the facts only, one per line, each line starting with \"- \". "
+    "Do not add any introduction, explanation, numbering or other text.\n\n")
 
 nltk.download("punkt")
 
 
 class AtomicFactGenerator(object):
-    def __init__(self, key_path, demon_dir, gpt3_cache_file=None):
+    def __init__(self, key_path, demon_dir, cache_file=None, model_name=ATOMIC_FACT_MODEL):
+        """key_path: the Anthropic key file (ANTHROPIC_API_KEY takes precedence)."""
         self.nlp = spacy.load("en_core_web_sm")
         self.is_bio = True
         self.demon_path = os.path.join(demon_dir, "demons.json" if self.is_bio else "demons_complex.json")
 
-        self.openai_lm = OpenAIModel("InstructGPT", cache_file=gpt3_cache_file, key_path=key_path)
+        self.lm = AnthropicModel(model_name, cache_file=cache_file, key_path=key_path,
+                                 web_search_max_uses=0, **no_thinking_kwargs(model_name))
         # get the demos
         with open(self.demon_path, 'r') as f:
             self.demons = json.load(f)
@@ -34,7 +51,7 @@ class AtomicFactGenerator(object):
         self.bm25 = BM25Okapi(tokenized_corpus)
 
     def save_cache(self):
-        self.openai_lm.save_cache()
+        self.lm.save_cache()
 
     def run(self, generation, cost_estimate=None):
         """Convert the generation into a set of atomic facts. Return a total words cost if cost_estimate != None."""
@@ -84,7 +101,7 @@ class AtomicFactGenerator(object):
             else:
                 atomic_facts_pairs.append((sent, atoms[sent]))
 
-        # postprocess_atomic_facts will fix minor issues from InstructGPT
+        # postprocess_atomic_facts will fix minor issues in the model's facts
         # it is supposed to handle sentence splitter issue too, but since here
         # we fixed sentence splitter issue already,
         # the new para_breaks should be identical to the original para_breaks
@@ -110,7 +127,7 @@ class AtomicFactGenerator(object):
             if sentence in atoms:
                 continue
             top_machings = best_demos(sentence, self.bm25, list(demons.keys()), k)
-            prompt = ""
+            prompt = FORMAT_INSTRUCTION
 
             for i in range(n):
                 prompt = prompt + "Please breakdown the following sentence into independent facts: {}\n".format(list(demons.keys())[i])
@@ -130,13 +147,13 @@ class AtomicFactGenerator(object):
         if cost_estimate:
             total_words_estimate = 0
             for prompt in prompts:
-                if cost_estimate == "consider_cache" and (prompt.strip() + "_0") in self.openai_lm.cache_dict:
+                if cost_estimate == "consider_cache" and (prompt.strip() + "_0") in self.lm.cache_dict:
                     continue
                 total_words_estimate += len(prompt.split())
             return total_words_estimate
         else:
             for prompt in prompts:
-                output, _ = self.openai_lm.generate(prompt)
+                output, _ = self.lm.generate(prompt, max_output_length=ATOMIC_FACT_MAX_OUTPUT_TOKENS)
                 atoms[prompt_to_sent[prompt]] = text_to_sentences(output)
 
             for key, value in demons.items():
@@ -152,7 +169,7 @@ def best_demos(query, bm25, demons_sents, k):
     return top_machings
 
 
-# transform InstructGPT output into sentences
+# transform the model's fact list into sentences
 def text_to_sentences(text):
     sentences = text.split("- ")[1:]
     sentences = [sent.strip()[:-1] if sent.strip()[-1] == '\n' else sent.strip() for sent in sentences]

@@ -53,6 +53,7 @@ demos
 original_generation
 enwiki-20230401.db
 api.key
+anthropic.key
 editing-data
 editing-demos
 data

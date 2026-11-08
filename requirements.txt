@@ -9,3 +9,6 @@ spacy
 # sentence_transformers>=2.2.2
 # transformers>=4.29.2
 # torch>=>=2.2.0
+# Entity fact checker (Claude + web search), see factscore/anthropic_lm.py
+anthropic
+pydantic
