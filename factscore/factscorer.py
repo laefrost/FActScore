@@ -277,9 +277,15 @@ class FactScorer(object):
             # one-word classification, so for the factscore checker the model is
             # asked not to think (see anthropic_lm.no_thinking_kwargs).
             lm_kwargs = {} if fact_checker == "entity" else no_thinking_kwargs(claude_model)
+            # the OpenAI batch settings double as the Message Batches settings
             self.lm = AnthropicModel(model_name=model_name,
                                      cache_file=os.path.join(cache_dir, f"{claude_model}.pkl"),
-                                     key_path=anthropic_key, **lm_kwargs)
+                                     key_path=anthropic_key,
+                                     use_batch_api=use_openai_batch_api,
+                                     batch_poll_interval=batch_poll_interval,
+                                     batch_size=openai_batch_size,
+                                     max_active_batches=openai_max_active_batches,
+                                     **lm_kwargs)
         else:
             self.lm = None
 

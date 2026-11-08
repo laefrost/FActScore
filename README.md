@@ -262,7 +262,14 @@ fs = FactScorer(model_name="retrieval+claude-haiku-5-5")   # or retrieval+claude
   is parsed from the one-word answer, as for the OpenAI reasoning models.
 - Verdicts are cached in `{cache_dir}/{model id}.pkl`, shared between the
   `retrieval+` and plain forms (the prompts differ, so the entries do not
-  collide). The OpenAI Batch API flag does not apply to these models.
+  collide).
+- `--openai_batch_api` / `use_openai_batch_api=True` sends the verdicts through
+  Anthropic's [Message Batches API](https://platform.claude.com/docs/en/build-with-claude/batch-processing)
+  instead: half price, results usually within an hour (24h at most). The
+  `openai_batch_size` / `openai_max_active_batches` / `batch_poll_interval`
+  settings apply as for OpenAI. Each ended batch is cached at once, so a
+  restarted run resubmits only what is missing. `load_batch_outputs` (recovery
+  of a lost OpenAI batch) has no Anthropic counterpart yet.
 
 ### The `entity` checker
 
