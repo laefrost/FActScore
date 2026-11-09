@@ -172,12 +172,11 @@ def best_demos(query, bm25, demons_sents, k):
 # transform the model's fact list into sentences
 def text_to_sentences(text):
     sentences = text.split("- ")[1:]
-    sentences = [sent.strip()[:-1] if sent.strip()[-1] == '\n' else sent.strip() for sent in sentences]
-    if len(sentences) > 0: 
-        if sentences[-1][-1] != '.':
-            sentences[-1] = sentences[-1] + '.' 
-    else:
-        sentences = []
+    # strip() already removes trailing newlines; drop empty chunks (e.g. a
+    # trailing "- " or a bare "-" line) so indexing below cannot fail.
+    sentences = [sent.strip() for sent in sentences if sent.strip()]
+    if sentences and sentences[-1][-1] != '.':
+        sentences[-1] = sentences[-1] + '.'
     return sentences
 
 
